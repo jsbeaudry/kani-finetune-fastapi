@@ -299,7 +299,7 @@ def run_data_preparation(
             # 1) Load dataset -- disable audio auto-decoding to avoid
             #    the torchcodec dependency.  We decode with soundfile.
             print(f"[{job_id}] [{ds_idx+1}/{len(dataset_sources)}] Loading: {ds_name} (split={split})")
-            dataset = load_dataset(ds_name, split=split)
+            dataset = load_dataset(ds_name, split=split, token=hf_token)
             dataset = dataset.cast_column(audio_col, Audio(decode=False))
             ds_len = len(dataset)
             total_samples += ds_len
