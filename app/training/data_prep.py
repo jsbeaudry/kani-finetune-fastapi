@@ -49,6 +49,7 @@ This output format is directly compatible with the Kani TTS training
 pipeline (``app.training.dataset.DatasetProcessor``).
 """
 
+import io
 import json
 import os
 import warnings
@@ -57,6 +58,7 @@ from typing import Dict
 
 import librosa
 import numpy as np
+import soundfile as sf
 import torch
 
 from nemo.collections.tts.models import AudioCodecModel
@@ -129,39 +131,61 @@ def _get_codec_model():
 SAMPLE_RATE = 22050
 
 
-def load_audio_from_array(audio_dict: dict) -> np.ndarray:
+def load_audio_from_raw(audio_value) -> np.ndarray:
     """
-    Extract and resample audio from a HuggingFace dataset audio column.
+    Load audio from a HuggingFace dataset audio column (raw / undecoded).
 
-    HF datasets store audio as::
+    When the audio column is cast with ``decode=False``, each row contains::
 
-        {"array": np.ndarray, "sampling_rate": int, "path": str}
+        {"bytes": b"...", "path": "filename.mp3"}
 
-    This function extracts the array and resamples to 22050 Hz if needed.
+    We decode the bytes with ``soundfile`` (or ``librosa`` as fallback)
+    and resample to 22 050 Hz. This avoids the ``torchcodec`` dependency
+    that newer ``datasets`` versions require for auto-decoding.
+
+    Also handles the legacy decoded format (dict with ``array`` key) as a
+    fallback for datasets that are already decoded.
 
     Args:
-        audio_dict: The audio column value from a HF dataset row.
+        audio_value: The raw audio column value from a HF dataset row.
 
     Returns:
         Float32 numpy array at 22050 Hz.
     """
-    audio_array = audio_dict["array"]
-    sr = audio_dict["sampling_rate"]
+    # Legacy decoded format: {"array": np.ndarray, "sampling_rate": int}
+    if isinstance(audio_value, dict) and "array" in audio_value:
+        audio_array = np.array(audio_value["array"], dtype=np.float32)
+        sr = audio_value["sampling_rate"]
+        if sr != SAMPLE_RATE:
+            audio_array = librosa.resample(audio_array, orig_sr=sr, target_sr=SAMPLE_RATE)
+        return audio_array
 
-    if sr != SAMPLE_RATE:
-        audio_array = librosa.resample(
-            np.array(audio_array, dtype=np.float32), orig_sr=sr, target_sr=SAMPLE_RATE
+    # Raw / undecoded format: {"bytes": b"...", "path": "..."}
+    raw_bytes = audio_value.get("bytes") if isinstance(audio_value, dict) else None
+    if raw_bytes is None:
+        raise ValueError(
+            f"Unsupported audio format: expected dict with 'bytes' or 'array' key, "
+            f"got {type(audio_value)}"
         )
 
-    return np.array(audio_array, dtype=np.float32)
+    audio_array, sr = sf.read(io.BytesIO(raw_bytes), dtype="float32")
+
+    # Convert stereo to mono if needed
+    if audio_array.ndim > 1:
+        audio_array = audio_array.mean(axis=1)
+
+    if sr != SAMPLE_RATE:
+        audio_array = librosa.resample(audio_array, orig_sr=sr, target_sr=SAMPLE_RATE)
+
+    return audio_array.astype(np.float32)
 
 
-def encode_audio(audio_dict: dict, codec_model, device: str) -> dict:
+def encode_audio(audio_value, codec_model, device: str) -> dict:
     """
     Encode a single audio sample into 4 NeMo codec token layers.
 
     Args:
-        audio_dict: HF dataset audio column value.
+        audio_value: HF dataset audio column value (raw bytes or decoded dict).
         codec_model: Loaded NeMo AudioCodecModel.
         device: Device string ("cuda" or "cpu").
 
@@ -171,7 +195,7 @@ def encode_audio(audio_dict: dict, codec_model, device: str) -> dict:
     Raises:
         Exception: On codec encoding failure.
     """
-    audio = load_audio_from_array(audio_dict)
+    audio = load_audio_from_raw(audio_value)
 
     # NeMo codec expects [B, C, T] tensor
     audio_tensor = torch.tensor(audio, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
@@ -231,14 +255,16 @@ def run_data_preparation(
     Side effects:
         Updates ``data_prep_jobs[job_id]`` throughout processing.
     """
-    from datasets import load_dataset, Dataset
+    from datasets import load_dataset, Dataset, Audio
 
     try:
         data_prep_jobs[job_id]["status"] = "running"
 
-        # 1) Load dataset
+        # 1) Load dataset -- disable audio auto-decoding to avoid the
+        #    torchcodec dependency.  We decode manually with soundfile.
         print(f"[{job_id}] Loading dataset: {dataset_name} (split={split})")
         dataset = load_dataset(dataset_name, split=split)
+        dataset = dataset.cast_column(audio_column, Audio(decode=False))
         total = len(dataset)
         data_prep_jobs[job_id]["total"] = total
         print(f"[{job_id}] Loaded {total} samples")
