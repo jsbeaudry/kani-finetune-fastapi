@@ -40,6 +40,8 @@ from app.schemas import (
     ModelLoadRequest,
     HealthResponse,
     ModelLoadResponse,
+    HubUploadRequest,
+    HubUploadResponse,
 )
 
 # ---------------------------------------------------------------------------
@@ -99,6 +101,8 @@ A production-ready Text-to-Speech API built on the
 - **LoRA fine-tuning** -- launch background training jobs with custom
   HuggingFace datasets and track their status.
 - **Model hot-swap** -- load a different checkpoint without restarting.
+- **Hub upload** -- push model checkpoints to HuggingFace Hub (auto after
+  training or via dedicated endpoint).
 - **Frame-level position encoding** -- optimized RoPE positions where all
   4 codec tokens per audio frame share a single position, improving
   long-form coherence and KV-cache efficiency.
@@ -142,7 +146,10 @@ app = FastAPI(
         },
         {
             "name": "Model Management",
-            "description": "Hot-swap the loaded model checkpoint at runtime.",
+            "description": (
+                "Hot-swap the loaded model checkpoint at runtime "
+                "and upload checkpoints to the HuggingFace Hub."
+            ),
         },
         {
             "name": "Health",
@@ -276,9 +283,9 @@ async def tts(req: TTSRequest):
         "Training runs asynchronously -- the endpoint returns immediately "
         "with a `job_id` that can be polled via `GET /train/{job_id}`.\n\n"
         "After training completes the LoRA weights are merged into the base "
-        "model and saved to `output_dir`. Optionally the merged model is "
-        "pushed to the HuggingFace Hub if `push_to_hub` is set and "
-        "`KANI_HF_TOKEN` is configured."
+        "model and saved to `output_dir`. If `hf_token` and `dataset_name` "
+        "are provided, the merged model is automatically uploaded to the "
+        "HuggingFace Hub."
     ),
 )
 async def train(req: TrainRequest):
@@ -379,3 +386,53 @@ async def load_model(req: ModelLoadRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
     return ModelLoadResponse(status="ok", model=req.model_path)
+
+
+@app.post(
+    "/model/upload",
+    response_model=HubUploadResponse,
+    tags=["Model Management"],
+    summary="Upload a checkpoint to HuggingFace Hub",
+    description=(
+        "Upload a local model checkpoint (weights + tokenizer) to the "
+        "HuggingFace Hub.\n\n"
+        "Use this to upload any checkpoint -- for example a model produced "
+        "by a training job, or an externally saved checkpoint.\n\n"
+        "The Hub repository is created automatically if it doesn't exist. "
+        "This endpoint blocks until the upload is complete."
+    ),
+    responses={
+        404: {"description": "Model directory not found at the given path."},
+        500: {"description": "Upload failed (auth error, network issue, etc.)."},
+    },
+)
+async def upload_model(req: HubUploadRequest):
+    """
+    Upload a local model checkpoint to the HuggingFace Hub.
+
+    Args:
+        req: HubUploadRequest with model_path, hf_token, and dataset_name.
+
+    Returns:
+        HubUploadResponse confirming the upload.
+
+    Raises:
+        HTTPException 404: If the model_path directory doesn't exist.
+        HTTPException 500: On upload failure.
+    """
+    from app.training.trainer import upload_to_hub
+
+    try:
+        await asyncio.to_thread(
+            upload_to_hub, req.model_path, req.hf_token, req.dataset_name
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return HubUploadResponse(
+        status="ok",
+        repo=req.dataset_name,
+        model_path=req.model_path,
+    )

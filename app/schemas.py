@@ -365,12 +365,22 @@ class TrainRequest(BaseModel):
         "./checkpoints",
         description="Directory where training checkpoints and the final merged model are saved.",
     )
-    push_to_hub: Optional[str] = Field(
+
+    # ── HuggingFace Hub upload (optional, runs automatically after training) ──
+    hf_token: Optional[str] = Field(
         None,
         description=(
-            "HuggingFace Hub repository ID to push the merged model to "
-            "after training (e.g. `user/model-name`). Requires KANI_HF_TOKEN "
-            "to be set. Omit to skip Hub upload."
+            "HuggingFace API token for uploading the merged model to the Hub "
+            "after training completes. If omitted, the model is only saved locally."
+        ),
+        examples=["hf_xxxxxxxxxxxxxxxxxxxx"],
+    )
+    dataset_name: Optional[str] = Field(
+        None,
+        description=(
+            "HuggingFace Hub repository ID to upload the merged model to "
+            "(e.g. `user/model-name`). Required if `hf_token` is provided. "
+            "The repo will be created automatically if it doesn't exist."
         ),
         examples=["jsbeaudry/haitian-kani-ht-v3"],
     )
@@ -390,6 +400,8 @@ class TrainRequest(BaseModel):
                     "num_train_epochs": 4,
                     "lora_r": 16,
                     "output_dir": "./checkpoints",
+                    "hf_token": "hf_xxxxxxxxxxxxxxxxxxxx",
+                    "dataset_name": "jsbeaudry/haitian-kani-ht-v3",
                 }
             ]
         }
@@ -467,4 +479,60 @@ class ModelLoadResponse(BaseModel):
         ...,
         description="The model path/repo that is now loaded.",
         examples=["jsbeaudry/haitian-kani-ht-v3"],
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Hub Upload
+# ═══════════════════════════════════════════════════════════════════════════
+
+class HubUploadRequest(BaseModel):
+    """
+    Request body for the POST /model/upload endpoint.
+
+    Uploads a local model checkpoint (model weights + tokenizer) to the
+    HuggingFace Hub.
+    """
+
+    model_path: str = Field(
+        ...,
+        description=(
+            "Local filesystem path to the model checkpoint directory. "
+            "Must contain the model weights and tokenizer files "
+            "(e.g. `./checkpoints/lora_kani_model_ft_exp`)."
+        ),
+        examples=["./checkpoints/lora_kani_model_ft_exp"],
+    )
+    hf_token: str = Field(
+        ...,
+        description="HuggingFace API token with write access.",
+        examples=["hf_xxxxxxxxxxxxxxxxxxxx"],
+    )
+    dataset_name: str = Field(
+        ...,
+        description=(
+            "HuggingFace Hub repository ID to upload the model to "
+            "(e.g. `user/model-name`). Created automatically if it doesn't exist."
+        ),
+        examples=["jsbeaudry/haitian-kani-ht-v3"],
+    )
+
+
+class HubUploadResponse(BaseModel):
+    """Response from POST /model/upload after a successful Hub upload."""
+
+    status: str = Field(
+        ...,
+        description="Operation status.",
+        examples=["ok"],
+    )
+    repo: str = Field(
+        ...,
+        description="The HuggingFace Hub repo the model was uploaded to.",
+        examples=["jsbeaudry/haitian-kani-ht-v3"],
+    )
+    model_path: str = Field(
+        ...,
+        description="The local path that was uploaded.",
+        examples=["./checkpoints/lora_kani_model_ft_exp"],
     )

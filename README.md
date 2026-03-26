@@ -9,6 +9,7 @@ A production-ready **Text-to-Speech API** built on the [Kani TTS](https://huggin
 - **Multi-speaker TTS** -- Condition speech generation on a `speaker_id` for voice selection
 - **LoRA fine-tuning** -- Launch background training jobs with custom HuggingFace datasets and track their status via API
 - **Model hot-swap** -- Load a different checkpoint at runtime without restarting the server
+- **HuggingFace Hub upload** -- Push models to the Hub automatically after training or via dedicated endpoint
 - **Frame-level position encoding** -- Optimized RoPE positions where all 4 codec tokens per audio frame share a single position ID, improving long-form coherence and KV-cache efficiency
 - **Flash Attention 2** -- Reduced memory usage and faster generation on Ampere+ GPUs
 - **Optional `torch.compile`** -- Kernel fusion for additional throughput
@@ -128,6 +129,7 @@ aplay output.wav
 | `POST` | `/train` | Start a LoRA fine-tuning job (background) |
 | `GET` | `/train/{job_id}` | Check training job status |
 | `POST` | `/model/load` | Hot-swap the loaded model checkpoint |
+| `POST` | `/model/upload` | Upload a checkpoint to HuggingFace Hub |
 
 ### Interactive docs
 
@@ -214,7 +216,8 @@ Launch a background LoRA fine-tuning job.
 | `warmup_ratio` | `float` | No | `0.1` | Warmup fraction |
 | `weight_decay` | `float` | No | `0.02` | L2 regularization |
 | `output_dir` | `string` | No | `./checkpoints` | Checkpoint save directory |
-| `push_to_hub` | `string` | No | `null` | HF repo ID to push merged model |
+| `hf_token` | `string` | No | `null` | HuggingFace API token (enables auto-upload after training) |
+| `dataset_name` | `string` | No | `null` | HF Hub repo ID to upload merged model to (required with `hf_token`) |
 
 **Dataset configuration** (`hf_datasets` items):
 
@@ -230,7 +233,7 @@ Launch a background LoRA fine-tuning job.
 | `max_len` | `int` | No | `null` | Random subsample limit |
 | `categorical_filter` | `object` | No | `null` | Row filter (`column_name` + `value`) |
 
-**Example -- single-speaker fine-tuning:**
+**Example -- single-speaker fine-tuning (save locally only):**
 ```bash
 curl -X POST http://localhost:8000/train \
   -H "Content-Type: application/json" \
@@ -248,7 +251,24 @@ curl -X POST http://localhost:8000/train \
   }'
 ```
 
-**Example -- multi-speaker fine-tuning with filtering:**
+**Example -- train and auto-upload to HuggingFace Hub:**
+```bash
+curl -X POST http://localhost:8000/train \
+  -H "Content-Type: application/json" \
+  -d '{
+    "hf_datasets": [
+      {
+        "reponame": "jsbeaudry/kani-pretrain-data",
+        "split": "train"
+      }
+    ],
+    "num_train_epochs": 4,
+    "hf_token": "hf_xxxxxxxxxxxxxxxxxxxx",
+    "dataset_name": "jsbeaudry/haitian-kani-ht-v3"
+  }'
+```
+
+**Example -- multi-speaker fine-tuning with filtering and Hub upload:**
 ```bash
 curl -X POST http://localhost:8000/train \
   -H "Content-Type: application/json" \
@@ -267,7 +287,8 @@ curl -X POST http://localhost:8000/train \
       }
     ],
     "max_duration_sec": 12,
-    "push_to_hub": "my-org/kani-multispeaker-v1"
+    "hf_token": "hf_xxxxxxxxxxxxxxxxxxxx",
+    "dataset_name": "my-org/kani-multispeaker-v1"
   }'
 ```
 
@@ -334,6 +355,44 @@ curl -X POST http://localhost:8000/model/load \
 
 ---
 
+### `POST /model/upload`
+
+Upload a local model checkpoint to the HuggingFace Hub.
+
+**Request body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `model_path` | `string` | Yes | Local path to the checkpoint directory |
+| `hf_token` | `string` | Yes | HuggingFace API token with write access |
+| `dataset_name` | `string` | Yes | Target Hub repo ID (e.g. `user/model-name`) |
+
+**Example -- upload a training checkpoint:**
+```bash
+curl -X POST http://localhost:8000/model/upload \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model_path": "./checkpoints/lora_kani_model_ft_exp",
+    "hf_token": "hf_xxxxxxxxxxxxxxxxxxxx",
+    "dataset_name": "jsbeaudry/haitian-kani-ht-v3"
+  }'
+```
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "repo": "jsbeaudry/haitian-kani-ht-v3",
+  "model_path": "./checkpoints/lora_kani_model_ft_exp"
+}
+```
+
+**Error responses:**
+- `404` -- Model directory not found at the given path
+- `500` -- Upload failed (authentication error, network issue, etc.)
+
+---
+
 ## Configuration
 
 All settings are configured via environment variables prefixed with `KANI_`:
@@ -343,7 +402,6 @@ All settings are configured via environment variables prefixed with `KANI_`:
 | `KANI_MODEL_NAME` | `nineninesix/kani-tts-400m-0.3-pt` | Model to load at startup |
 | `KANI_DEVICE_MAP` | `auto` | PyTorch device map (`auto`, `cpu`, `cuda:0`) |
 | `KANI_CHECKPOINT_DIR` | `./checkpoints` | Default checkpoint directory |
-| `KANI_HF_TOKEN` | -- | HuggingFace token for Hub push |
 | `KANI_MAX_NEW_TOKENS` | `1200` | Default max generation length |
 | `KANI_TEMPERATURE` | `0.8` | Default sampling temperature |
 | `KANI_TOP_P` | `0.95` | Default nucleus sampling threshold |
@@ -364,26 +422,28 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 ## Training Workflow
 
-### End-to-end fine-tuning via the API
+### End-to-end: train, upload, and use
 
 ```bash
 # 1. Start the server
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 
-# 2. Launch training
+# 2. Launch training (with auto-upload to Hub)
 JOB=$(curl -s -X POST http://localhost:8000/train \
   -H "Content-Type: application/json" \
   -d '{
     "hf_datasets": [{"reponame": "jsbeaudry/kani-pretrain-data"}],
-    "num_train_epochs": 4
+    "num_train_epochs": 4,
+    "hf_token": "hf_xxxxxxxxxxxxxxxxxxxx",
+    "dataset_name": "jsbeaudry/haitian-kani-ht-v3"
   }' | python3 -c "import sys,json; print(json.load(sys.stdin)['job_id'])")
 
 echo "Training job: $JOB"
 
-# 3. Poll status
+# 3. Poll status until completed
 curl http://localhost:8000/train/$JOB
 
-# 4. Once completed, hot-swap to the fine-tuned model
+# 4. Hot-swap to the fine-tuned model
 curl -X POST http://localhost:8000/model/load \
   -H "Content-Type: application/json" \
   -d '{"model_path": "./checkpoints/lora_kani_model_ft_exp"}'
@@ -395,6 +455,19 @@ curl -X POST http://localhost:8000/tts \
   --output finetuned_output.wav
 ```
 
+### Upload a checkpoint manually (separate from training)
+
+```bash
+# Upload any local checkpoint to HuggingFace Hub
+curl -X POST http://localhost:8000/model/upload \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model_path": "./checkpoints/lora_kani_model_ft_exp",
+    "hf_token": "hf_xxxxxxxxxxxxxxxxxxxx",
+    "dataset_name": "jsbeaudry/my-custom-kani-model"
+  }'
+```
+
 ### Training pipeline details
 
 1. **Dataset loading** -- Downloads HF datasets and applies optional categorical filters
@@ -403,7 +476,7 @@ curl -X POST http://localhost:8000/tts \
 4. **LoRA injection** -- Applies low-rank adapters to attention modules (configurable)
 5. **SFT training** -- Supervised fine-tuning with cosine LR schedule and custom collator
 6. **Merge & save** -- LoRA weights merged into base model for standalone deployment
-7. **Hub push** (optional) -- Upload to HuggingFace Hub with provided token
+7. **Hub upload** (optional) -- Auto-upload to HuggingFace Hub if `hf_token` + `dataset_name` are provided
 
 ---
 

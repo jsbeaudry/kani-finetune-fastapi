@@ -249,13 +249,12 @@ def run_training(job_id: str, req: TrainRequest) -> None:
         tokenizer.save_pretrained(merged_path)
         print(f"[{job_id}] Merged model saved to {merged_path}")
 
-        # ── 6) Optional Hub push ──
-        if req.push_to_hub:
-            hf_token = os.environ.get("KANI_HF_TOKEN", os.environ.get("HF_TOKEN", ""))
-            if hf_token:
-                merged_model.push_to_hub(req.push_to_hub, token=hf_token)
-                tokenizer.push_to_hub(req.push_to_hub, token=hf_token)
-                print(f"[{job_id}] Pushed to hub: {req.push_to_hub}")
+        # ── 6) Optional Hub upload ──
+        if req.hf_token and req.dataset_name:
+            merged_model.push_to_hub(req.dataset_name, token=req.hf_token)
+            tokenizer.push_to_hub(req.dataset_name, token=req.hf_token)
+            print(f"[{job_id}] Uploaded to HuggingFace Hub: {req.dataset_name}")
+            training_jobs[job_id]["hub_repo"] = req.dataset_name
 
         training_jobs[job_id]["status"] = "completed"
         training_jobs[job_id]["model_path"] = merged_path
@@ -264,3 +263,45 @@ def run_training(job_id: str, req: TrainRequest) -> None:
         training_jobs[job_id]["status"] = "failed"
         training_jobs[job_id]["error"] = traceback.format_exc()
         print(f"[{job_id}] Training failed: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Standalone Hub upload
+# ---------------------------------------------------------------------------
+
+def upload_to_hub(model_path: str, hf_token: str, dataset_name: str) -> None:
+    """
+    Upload a local model checkpoint to the HuggingFace Hub.
+
+    Loads the model and tokenizer from the given path, then pushes both
+    to the specified Hub repository. The repo is created automatically
+    if it doesn't exist.
+
+    This function is designed to be called in a background thread via
+    ``asyncio.to_thread()``.
+
+    Args:
+        model_path: Local filesystem path to the checkpoint directory
+            (must contain model weights and tokenizer files).
+        hf_token: HuggingFace API token with write permissions.
+        dataset_name: Target Hub repository ID (e.g. ``user/model-name``).
+
+    Raises:
+        FileNotFoundError: If model_path does not exist.
+        Exception: On Hub authentication or upload failure.
+    """
+    if not os.path.isdir(model_path):
+        raise FileNotFoundError(f"Model directory not found: {model_path}")
+
+    print(f"Loading model from {model_path} for Hub upload...")
+    model = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        torch_dtype="bfloat16",
+        device_map="cpu",
+    )
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+
+    print(f"Uploading to {dataset_name}...")
+    model.push_to_hub(dataset_name, token=hf_token)
+    tokenizer.push_to_hub(dataset_name, token=hf_token)
+    print(f"Upload complete: {dataset_name}")
