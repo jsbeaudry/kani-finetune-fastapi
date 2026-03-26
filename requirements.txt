@@ -1,4 +1,5 @@
 fastapi>=0.115.0
+pydantic-settings>=2.0.0
 uvicorn[standard]>=0.30.0
 torch
 transformers==4.54.0
@@ -10,4 +11,5 @@ omegaconf
 scipy
 numpy
 librosa
+soundfile
 nemo_toolkit[tts]
