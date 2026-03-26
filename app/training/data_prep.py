@@ -204,8 +204,8 @@ def encode_audio(audio_value, codec_model, device: str) -> dict:
     """
     audio = load_audio_from_raw(audio_value)
 
-    # NeMo codec expects [B, C, T] tensor
-    audio_tensor = torch.tensor(audio, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
+    # NeMo codec encode() expects [B, T] (batch, time) -- NOT [B, C, T]
+    audio_tensor = torch.tensor(audio, dtype=torch.float32).unsqueeze(0).to(device)
     audio_len = torch.tensor([audio_tensor.shape[-1]], dtype=torch.int32).to(device)
 
     with torch.inference_mode():
