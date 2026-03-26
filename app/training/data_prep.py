@@ -168,7 +168,14 @@ def load_audio_from_raw(audio_value) -> np.ndarray:
             f"got {type(audio_value)}"
         )
 
-    audio_array, sr = sf.read(io.BytesIO(raw_bytes), dtype="float32")
+    buf = io.BytesIO(raw_bytes)
+
+    # Try soundfile first, fall back to librosa for non-WAV formats
+    try:
+        audio_array, sr = sf.read(buf, dtype="float32")
+    except Exception:
+        buf.seek(0)
+        audio_array, sr = librosa.load(buf, sr=None, mono=True)
 
     # Convert stereo to mono if needed
     if audio_array.ndim > 1:
@@ -298,7 +305,11 @@ def run_data_preparation(
 
             except Exception as e:
                 failed_count += 1
-                print(f"[{job_id}] Error encoding sample {idx}: {e}")
+                if failed_count <= 3:
+                    # Print full traceback for the first few failures to aid debugging
+                    print(f"[{job_id}] Error encoding sample {idx}:\n{traceback.format_exc()}")
+                else:
+                    print(f"[{job_id}] Error encoding sample {idx}: {e}")
 
         data_prep_jobs[job_id]["processed"] = len(results)
         data_prep_jobs[job_id]["failed_samples"] = failed_count
