@@ -80,11 +80,23 @@ class NemoAudioPlayer:
 
     def __init__(self, config: Settings, text_tokenizer_name: str = None) -> None:
         self.conf = config
-        self.nemo_codec_model = (
-            AudioCodecModel
-            .from_pretrained("nvidia/nemo-nano-codec-22khz-0.6kbps-12.5fps")
-            .eval()
+
+        # Load NeMo codec WITHOUT the discriminator to avoid the torch.load
+        # CVE-2025-32434 error.  The discriminator is only used during codec
+        # training -- encode() and decode() only need encoder + decoder + quantizer.
+        _codec_cfg = AudioCodecModel.from_pretrained(
+            "nvidia/nemo-nano-codec-22khz-0.6kbps-12.5fps",
+            return_config=True,
         )
+        _codec_cfg.discriminator = None
+        self.nemo_codec_model = AudioCodecModel.from_pretrained(
+            "nvidia/nemo-nano-codec-22khz-0.6kbps-12.5fps",
+            override_config_path=_codec_cfg,
+            strict=False,
+            map_location="cpu",
+        )
+        self.nemo_codec_model.eval()
+
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.nemo_codec_model.to(self.device)
 

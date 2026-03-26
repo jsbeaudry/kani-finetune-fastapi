@@ -96,6 +96,10 @@ def _get_codec_model():
     The model is loaded once on first call and cached for subsequent uses.
     Runs on CUDA if available, otherwise CPU.
 
+    The discriminator is intentionally skipped -- it is only needed for
+    codec training, not for encode/decode. Skipping it avoids the
+    ``torch.load`` CVE-2025-32434 error on PyTorch < 2.6.
+
     Returns:
         Tuple of (codec_model, device_string).
     """
@@ -103,12 +107,21 @@ def _get_codec_model():
     if _codec_model is None:
         print("Loading NeMo Nano Codec for data preparation...")
         _codec_device = "cuda" if torch.cuda.is_available() else "cpu"
-        _codec_model = (
-            AudioCodecModel
-            .from_pretrained("nvidia/nemo-nano-codec-22khz-0.6kbps-12.5fps")
-            .eval()
-            .to(_codec_device)
+
+        # Load config first, disable discriminator, then restore
+        _codec_cfg = AudioCodecModel.from_pretrained(
+            "nvidia/nemo-nano-codec-22khz-0.6kbps-12.5fps",
+            return_config=True,
         )
+        _codec_cfg.discriminator = None
+        _codec_model = AudioCodecModel.from_pretrained(
+            "nvidia/nemo-nano-codec-22khz-0.6kbps-12.5fps",
+            override_config_path=_codec_cfg,
+            strict=False,
+            map_location="cpu",
+        )
+        _codec_model.eval().to(_codec_device)
+
         print(f"NeMo Codec loaded on {_codec_device}")
     return _codec_model, _codec_device
 
