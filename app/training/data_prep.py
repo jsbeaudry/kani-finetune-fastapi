@@ -108,7 +108,6 @@ def _get_codec_model():
     global _codec_model, _codec_device
     if _codec_model is None:
         print("Loading NeMo Nano Codec for data preparation...")
-        _codec_device = "cuda" if torch.cuda.is_available() else "cpu"
 
         # Load config first, disable discriminator, then restore
         _codec_cfg = AudioCodecModel.from_pretrained(
@@ -122,7 +121,22 @@ def _get_codec_model():
             strict=False,
             map_location="cpu",
         )
-        _codec_model.eval().to(_codec_device)
+        _codec_model.eval()
+
+        # Try CUDA first; fall back to CPU if the GPU arch is unsupported
+        if torch.cuda.is_available():
+            try:
+                _codec_model.to("cuda")
+                # Smoke-test: run a tiny tensor op to catch arch mismatches early
+                _test = torch.zeros(1, device="cuda") + 1
+                del _test
+                _codec_device = "cuda"
+            except RuntimeError:
+                print("CUDA kernel not available for this GPU -- falling back to CPU")
+                _codec_model.to("cpu")
+                _codec_device = "cpu"
+        else:
+            _codec_device = "cpu"
 
         print(f"NeMo Codec loaded on {_codec_device}")
     return _codec_model, _codec_device
