@@ -7,6 +7,7 @@ A production-ready **Text-to-Speech API** built on the [Kani TTS](https://huggin
 ## Features
 
 - **Multi-speaker TTS** -- Condition speech generation on a `speaker_id` for voice selection
+- **Data preparation** -- Encode raw audio datasets into NeMo codec tokens via API, ready for training
 - **LoRA fine-tuning** -- Launch background training jobs with custom HuggingFace datasets and track their status via API
 - **Model hot-swap** -- Load a different checkpoint at runtime without restarting the server
 - **HuggingFace Hub upload** -- Push models to the Hub automatically after training or via dedicated endpoint
@@ -126,6 +127,8 @@ aplay output.wav
 |--------|----------|-------------|
 | `GET` | `/health` | Health check / readiness probe |
 | `POST` | `/tts` | Generate speech from text (returns WAV) |
+| `POST` | `/data/prepare` | Encode audio dataset into NeMo codec tokens (background) |
+| `GET` | `/data/prepare/{job_id}` | Check data preparation job status |
 | `POST` | `/train` | Start a LoRA fine-tuning job (background) |
 | `GET` | `/train/{job_id}` | Check training job status |
 | `POST` | `/model/load` | Hot-swap the loaded model checkpoint |
@@ -189,6 +192,98 @@ curl -X POST http://localhost:8000/tts \
 **Error responses:**
 - `422` -- Model failed to produce valid audio tokens
 - `503` -- Model still loading
+
+---
+
+### `POST /data/prepare`
+
+Encode raw audio from a HuggingFace dataset into NeMo Nano Codec tokens. Produces a dataset ready for Kani TTS fine-tuning.
+
+Runs in the background -- returns a `job_id` to poll progress.
+
+**Request body:**
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `dataset_name` | `string` | Yes | -- | HF dataset repo ID with audio data |
+| `split` | `string` | No | `train` | Dataset split to encode |
+| `audio_column` | `string` | No | `audio` | Name of the audio column |
+| `text_column` | `string` | No | `text` | Name of the text transcription column |
+| `speaker_column` | `string` | No | `null` | Column with speaker IDs (for multi-speaker datasets) |
+| `speaker_id` | `string` | No | `null` | Fixed speaker ID for all samples (overrides `speaker_column`) |
+| `output_dir` | `string` | No | `./encoded_data` | Directory to save encoded JSON |
+| `hf_token` | `string` | No | `null` | HF token (enables auto-upload of encoded dataset) |
+| `hub_repo` | `string` | No | `null` | HF Hub repo to upload encoded dataset to |
+
+**Example -- encode a dataset and upload to Hub:**
+```bash
+curl -X POST http://localhost:8000/data/prepare \
+  -H "Content-Type: application/json" \
+  -d '{
+    "dataset_name": "jsbeaudry/my-audio-dataset",
+    "split": "train",
+    "audio_column": "audio",
+    "text_column": "text",
+    "speaker_id": "alice",
+    "hf_token": "hf_xxxxxxxxxxxxxxxxxxxx",
+    "hub_repo": "jsbeaudry/kani-pretrain-data"
+  }'
+```
+
+**Example -- encode locally only:**
+```bash
+curl -X POST http://localhost:8000/data/prepare \
+  -H "Content-Type: application/json" \
+  -d '{
+    "dataset_name": "mozilla-foundation/common_voice_17_0",
+    "split": "train",
+    "speaker_column": "client_id",
+    "text_column": "sentence",
+    "output_dir": "./encoded_data"
+  }'
+```
+
+**Response:**
+```json
+{
+  "job_id": "e5f6g7h8",
+  "status": "started"
+}
+```
+
+---
+
+### `GET /data/prepare/{job_id}`
+
+Check data preparation progress.
+
+**Response:**
+```json
+{
+  "job_id": "e5f6g7h8",
+  "status": "running",
+  "total": 5000,
+  "processed": 1250,
+  "failed_samples": 3,
+  "output_path": null,
+  "hub_repo": null,
+  "error": null
+}
+```
+
+When completed:
+```json
+{
+  "job_id": "e5f6g7h8",
+  "status": "completed",
+  "total": 5000,
+  "processed": 4997,
+  "failed_samples": 3,
+  "output_path": "./encoded_data/jsbeaudry-my-audio-dataset-train-nemo-encoded.json",
+  "hub_repo": "jsbeaudry/kani-pretrain-data",
+  "error": null
+}
+```
 
 ---
 
@@ -420,15 +515,31 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 ---
 
-## Training Workflow
+## Full Pipeline Workflow
 
-### End-to-end: train, upload, and use
+### End-to-end: prepare data, train, upload, and use
 
 ```bash
 # 1. Start the server
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 
-# 2. Launch training (with auto-upload to Hub)
+# 2. Encode raw audio into NeMo codec tokens
+PREP=$(curl -s -X POST http://localhost:8000/data/prepare \
+  -H "Content-Type: application/json" \
+  -d '{
+    "dataset_name": "jsbeaudry/my-audio-dataset",
+    "split": "train",
+    "speaker_id": "alice",
+    "hf_token": "hf_xxxxxxxxxxxxxxxxxxxx",
+    "hub_repo": "jsbeaudry/kani-pretrain-data"
+  }' | python3 -c "import sys,json; print(json.load(sys.stdin)['job_id'])")
+
+echo "Data prep job: $PREP"
+
+# 3. Poll data prep status until completed
+curl http://localhost:8000/data/prepare/$PREP
+
+# 4. Launch training using the encoded dataset (with auto-upload to Hub)
 JOB=$(curl -s -X POST http://localhost:8000/train \
   -H "Content-Type: application/json" \
   -d '{
@@ -440,15 +551,15 @@ JOB=$(curl -s -X POST http://localhost:8000/train \
 
 echo "Training job: $JOB"
 
-# 3. Poll status until completed
+# 5. Poll training status until completed
 curl http://localhost:8000/train/$JOB
 
-# 4. Hot-swap to the fine-tuned model
+# 6. Hot-swap to the fine-tuned model
 curl -X POST http://localhost:8000/model/load \
   -H "Content-Type: application/json" \
   -d '{"model_path": "./checkpoints/lora_kani_model_ft_exp"}'
 
-# 5. Generate speech with the fine-tuned model
+# 7. Generate speech with the fine-tuned model
 curl -X POST http://localhost:8000/tts \
   -H "Content-Type: application/json" \
   -d '{"text": "Hello from the fine-tuned model!"}' \
@@ -468,9 +579,17 @@ curl -X POST http://localhost:8000/model/upload \
   }'
 ```
 
-### Training pipeline details
+### Pipeline details
 
-1. **Dataset loading** -- Downloads HF datasets and applies optional categorical filters
+**Data Preparation** (`POST /data/prepare`):
+1. **Load HF dataset** -- Downloads the dataset with raw audio
+2. **Resample audio** -- Converts to 22050 Hz if needed
+3. **NeMo codec encode** -- Produces 4 codebook token layers per sample
+4. **Save JSON** -- Writes encoded data locally
+5. **Hub upload** (optional) -- Pushes encoded dataset to HuggingFace Hub
+
+**Training** (`POST /train`):
+1. **Dataset loading** -- Downloads pre-encoded HF datasets and applies optional categorical filters
 2. **Parallel preprocessing** -- Splits into shards, processes codec tokens in parallel workers
 3. **Frame-level position encoding** -- Groups of 4 codec tokens share one RoPE position
 4. **LoRA injection** -- Applies low-rank adapters to attention modules (configurable)

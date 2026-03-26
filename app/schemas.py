@@ -6,9 +6,11 @@ Pydantic models used for request validation and OpenAPI documentation
 across all API endpoints. Organized by domain:
 
 - **Inference**: TTSRequest
+- **Data Preparation**: DataPrepRequest, DataPrepResponse, DataPrepStatusResponse
 - **Training**: TrainRequest, TrainResponse, TrainStatusResponse,
   CategoricalFilterSchema, HFDatasetSchema
 - **Model Management**: ModelLoadRequest, ModelLoadResponse
+- **Hub Upload**: HubUploadRequest, HubUploadResponse
 - **Health**: HealthResponse
 """
 
@@ -535,4 +537,152 @@ class HubUploadResponse(BaseModel):
         ...,
         description="The local path that was uploaded.",
         examples=["./checkpoints/lora_kani_model_ft_exp"],
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Data Preparation
+# ═══════════════════════════════════════════════════════════════════════════
+
+class DataPrepRequest(BaseModel):
+    """
+    Request body for the POST /data/prepare endpoint.
+
+    Encodes raw audio from a HuggingFace dataset into NeMo Nano Codec
+    tokens, producing a dataset ready for Kani TTS fine-tuning.
+
+    The source dataset must contain an audio column (HF audio format)
+    and a text transcription column.
+    """
+
+    dataset_name: str = Field(
+        ...,
+        description=(
+            "HuggingFace dataset repository ID containing raw audio "
+            "(e.g. `mozilla-foundation/common_voice_17_0`)."
+        ),
+        examples=["jsbeaudry/my-audio-dataset"],
+    )
+    split: str = Field(
+        "train",
+        description="Dataset split to encode (`train`, `test`, `validation`).",
+    )
+    audio_column: str = Field(
+        "audio",
+        description="Name of the column containing audio data (HF audio format).",
+    )
+    text_column: str = Field(
+        "text",
+        description="Name of the column containing text transcriptions.",
+    )
+    speaker_column: Optional[str] = Field(
+        None,
+        description=(
+            "Name of the column containing speaker IDs. "
+            "If set, each sample's speaker value is read from this column. "
+            "Ignored if `speaker_id` is also provided."
+        ),
+        examples=["speaker_id", "speaker"],
+    )
+    speaker_id: Optional[str] = Field(
+        None,
+        description=(
+            "Fixed speaker ID to assign to ALL samples. "
+            "Use this for single-speaker datasets. "
+            "Overrides `speaker_column` if both are provided."
+        ),
+        examples=["alice", "0047599005d8"],
+    )
+    output_dir: str = Field(
+        "./encoded_data",
+        description="Local directory to save the encoded JSON output.",
+    )
+
+    # Optional Hub upload
+    hf_token: Optional[str] = Field(
+        None,
+        description=(
+            "HuggingFace API token. When provided along with `hub_repo`, "
+            "the encoded dataset is automatically uploaded to the Hub."
+        ),
+        examples=["hf_xxxxxxxxxxxxxxxxxxxx"],
+    )
+    hub_repo: Optional[str] = Field(
+        None,
+        description=(
+            "HuggingFace Hub repo ID to upload the encoded dataset to "
+            "(e.g. `user/encoded-dataset`). Requires `hf_token`."
+        ),
+        examples=["jsbeaudry/kani-pretrain-data"],
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "dataset_name": "jsbeaudry/my-audio-dataset",
+                    "split": "train",
+                    "audio_column": "audio",
+                    "text_column": "text",
+                    "speaker_id": "alice",
+                    "output_dir": "./encoded_data",
+                    "hf_token": "hf_xxxxxxxxxxxxxxxxxxxx",
+                    "hub_repo": "jsbeaudry/kani-pretrain-data",
+                }
+            ]
+        }
+    }
+
+
+class DataPrepResponse(BaseModel):
+    """Response returned immediately when a data preparation job is submitted."""
+
+    job_id: str = Field(
+        ...,
+        description="Unique 8-character identifier for this data prep job.",
+        examples=["e5f6g7h8"],
+    )
+    status: str = Field(
+        ...,
+        description="Initial status of the job (always `\"started\"`).",
+        examples=["started"],
+    )
+
+
+class DataPrepStatusResponse(BaseModel):
+    """Response from GET /data/prepare/{job_id} showing encoding progress."""
+
+    job_id: str = Field(
+        ...,
+        description="The data preparation job identifier.",
+        examples=["e5f6g7h8"],
+    )
+    status: str = Field(
+        ...,
+        description="Current job status: `starting`, `running`, `completed`, or `failed`.",
+        examples=["running", "completed", "failed"],
+    )
+    total: Optional[int] = Field(
+        None,
+        description="Total number of samples in the source dataset.",
+    )
+    processed: int = Field(
+        0,
+        description="Number of samples successfully encoded so far.",
+    )
+    failed_samples: int = Field(
+        0,
+        description="Number of samples that failed to encode.",
+    )
+    output_path: Optional[str] = Field(
+        None,
+        description="Path to the output JSON file (set when completed).",
+    )
+    hub_repo: Optional[str] = Field(
+        None,
+        description="Hub repo the encoded dataset was uploaded to (if applicable).",
+    )
+    error: Optional[str] = Field(
+        None,
+        description="Python traceback if the job failed.",
     )

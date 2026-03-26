@@ -42,6 +42,9 @@ from app.schemas import (
     ModelLoadResponse,
     HubUploadRequest,
     HubUploadResponse,
+    DataPrepRequest,
+    DataPrepResponse,
+    DataPrepStatusResponse,
 )
 
 # ---------------------------------------------------------------------------
@@ -136,6 +139,13 @@ app = FastAPI(
         {
             "name": "Inference",
             "description": "Generate speech audio from text input.",
+        },
+        {
+            "name": "Data Preparation",
+            "description": (
+                "Encode raw audio datasets into NeMo Nano Codec tokens "
+                "for Kani TTS training. Runs in the background."
+            ),
         },
         {
             "name": "Training",
@@ -261,6 +271,107 @@ async def tts(req: TTSRequest):
         buf,
         media_type="audio/wav",
         headers={"Content-Disposition": 'attachment; filename="output.wav"'},
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Data Preparation
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.post(
+    "/data/prepare",
+    response_model=DataPrepResponse,
+    tags=["Data Preparation"],
+    summary="Encode audio dataset into NeMo codec tokens",
+    description=(
+        "Encodes raw audio from a HuggingFace dataset into NeMo Nano Codec "
+        "tokens (4 codebook layers), producing a dataset ready for Kani TTS "
+        "fine-tuning.\n\n"
+        "The source dataset must have an **audio column** (HF audio format) "
+        "and a **text column** with transcriptions.\n\n"
+        "Processing runs in the background -- the endpoint returns immediately "
+        "with a `job_id` that can be polled via `GET /data/prepare/{job_id}`.\n\n"
+        "**Output**: A JSON file with `nano_layer_1..4`, `encoded_len`, `text`, "
+        "and `speaker` fields per sample. Optionally uploaded to HuggingFace Hub."
+    ),
+)
+async def prepare_data(req: DataPrepRequest):
+    """
+    Launch a background data preparation job.
+
+    Returns:
+        DataPrepResponse with the assigned job_id and initial status.
+    """
+    from app.training.data_prep import data_prep_jobs, run_data_preparation
+
+    job_id = str(uuid.uuid4())[:8]
+    data_prep_jobs[job_id] = {
+        "status": "starting",
+        "error": None,
+        "total": None,
+        "processed": 0,
+        "failed_samples": 0,
+        "output_path": None,
+        "hub_repo": None,
+    }
+
+    asyncio.get_event_loop().run_in_executor(
+        None,
+        run_data_preparation,
+        job_id,
+        req.dataset_name,
+        req.split,
+        req.text_column,
+        req.audio_column,
+        req.speaker_column,
+        req.speaker_id,
+        req.output_dir,
+        req.hf_token,
+        req.hub_repo,
+    )
+
+    return DataPrepResponse(job_id=job_id, status="started")
+
+
+@app.get(
+    "/data/prepare/{job_id}",
+    response_model=DataPrepStatusResponse,
+    tags=["Data Preparation"],
+    summary="Check data preparation job status",
+    description=(
+        "Poll the status of a data preparation job.\n\n"
+        "Returns the number of samples processed so far, the total, "
+        "and the output path when completed."
+    ),
+    responses={
+        404: {"description": "No data preparation job found with the given ID."},
+    },
+)
+async def data_prep_status(job_id: str):
+    """
+    Query the status of a data preparation job.
+
+    Args:
+        job_id: The 8-character UUID returned by POST /data/prepare.
+
+    Returns:
+        DataPrepStatusResponse with progress info.
+    """
+    from app.training.data_prep import data_prep_jobs
+
+    if job_id not in data_prep_jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    job = data_prep_jobs[job_id]
+    return DataPrepStatusResponse(
+        job_id=job_id,
+        status=job["status"],
+        total=job.get("total"),
+        processed=job.get("processed", 0),
+        failed_samples=job.get("failed_samples", 0),
+        output_path=job.get("output_path"),
+        hub_repo=job.get("hub_repo"),
+        error=job.get("error"),
     )
 
 
