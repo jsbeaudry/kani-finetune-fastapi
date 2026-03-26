@@ -282,17 +282,18 @@ async def tts(req: TTSRequest):
     "/data/prepare",
     response_model=DataPrepResponse,
     tags=["Data Preparation"],
-    summary="Encode audio dataset into NeMo codec tokens",
+    summary="Encode audio dataset(s) into NeMo codec tokens",
     description=(
-        "Encodes raw audio from a HuggingFace dataset into NeMo Nano Codec "
-        "tokens (4 codebook layers), producing a dataset ready for Kani TTS "
-        "fine-tuning.\n\n"
-        "The source dataset must have an **audio column** (HF audio format) "
-        "and a **text column** with transcriptions.\n\n"
+        "Encodes raw audio from **one or more** HuggingFace datasets into "
+        "NeMo Nano Codec tokens (4 codebook layers), merges the results, "
+        "and produces a single dataset ready for Kani TTS fine-tuning.\n\n"
+        "Each entry in `datasets` can point to a different HF repo with "
+        "its own column names and speaker settings.\n\n"
         "Processing runs in the background -- the endpoint returns immediately "
         "with a `job_id` that can be polled via `GET /data/prepare/{job_id}`.\n\n"
-        "**Output**: A JSON file with `nano_layer_1..4`, `encoded_len`, `text`, "
-        "and `speaker` fields per sample. Optionally uploaded to HuggingFace Hub."
+        "**Output**: A merged JSON file with `nano_layer_1..4`, `encoded_len`, "
+        "`text`, and `speaker` fields per sample. Optionally uploaded to a "
+        "single HuggingFace Hub repository."
     ),
 )
 async def prepare_data(req: DataPrepRequest):
@@ -313,18 +314,19 @@ async def prepare_data(req: DataPrepRequest):
         "failed_samples": 0,
         "output_path": None,
         "hub_repo": None,
+        "current_dataset": None,
+        "datasets_done": 0,
+        "datasets_total": len(req.datasets),
     }
+
+    # Serialize dataset sources to plain dicts for the background thread
+    sources = [ds.model_dump() for ds in req.datasets]
 
     asyncio.get_event_loop().run_in_executor(
         None,
         run_data_preparation,
         job_id,
-        req.dataset_name,
-        req.split,
-        req.text_column,
-        req.audio_column,
-        req.speaker_column,
-        req.speaker_id,
+        sources,
         req.output_dir,
         req.hf_token,
         req.hub_repo,
@@ -366,6 +368,9 @@ async def data_prep_status(job_id: str):
     return DataPrepStatusResponse(
         job_id=job_id,
         status=job["status"],
+        current_dataset=job.get("current_dataset"),
+        datasets_done=job.get("datasets_done", 0),
+        datasets_total=job.get("datasets_total", 0),
         total=job.get("total"),
         processed=job.get("processed", 0),
         failed_samples=job.get("failed_samples", 0),

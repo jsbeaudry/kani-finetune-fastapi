@@ -197,11 +197,20 @@ curl -X POST http://localhost:8000/tts \
 
 ### `POST /data/prepare`
 
-Encode raw audio from a HuggingFace dataset into NeMo Nano Codec tokens. Produces a dataset ready for Kani TTS fine-tuning.
+Encode raw audio from **one or more** HuggingFace datasets into NeMo Nano Codec tokens, merge the results, and produce a single dataset ready for Kani TTS fine-tuning.
 
 Runs in the background -- returns a `job_id` to poll progress.
 
 **Request body:**
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `datasets` | `array` | Yes | -- | One or more dataset sources (see below) |
+| `output_dir` | `string` | No | `./encoded_data` | Directory to save merged encoded JSON |
+| `hf_token` | `string` | No | `null` | HF token (enables auto-upload of merged dataset) |
+| `hub_repo` | `string` | No | `null` | HF Hub repo to upload merged dataset to |
+
+**Each entry in `datasets`:**
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
@@ -211,35 +220,43 @@ Runs in the background -- returns a `job_id` to poll progress.
 | `text_column` | `string` | No | `text` | Name of the text transcription column |
 | `speaker_column` | `string` | No | `null` | Column with speaker IDs (for multi-speaker datasets) |
 | `speaker_id` | `string` | No | `null` | Fixed speaker ID for all samples (overrides `speaker_column`) |
-| `output_dir` | `string` | No | `./encoded_data` | Directory to save encoded JSON |
-| `hf_token` | `string` | No | `null` | HF token (enables auto-upload of encoded dataset) |
-| `hub_repo` | `string` | No | `null` | HF Hub repo to upload encoded dataset to |
 
-**Example -- encode a dataset and upload to Hub:**
+**Example -- merge multiple datasets and upload to Hub:**
 ```bash
 curl -X POST http://localhost:8000/data/prepare \
   -H "Content-Type: application/json" \
   -d '{
-    "dataset_name": "jsbeaudry/my-audio-dataset",
-    "split": "train",
-    "audio_column": "audio",
-    "text_column": "text",
-    "speaker_id": "alice",
+    "datasets": [
+      {
+        "dataset_name": "jsbeaudry/ecommerce-creole",
+        "split": "train",
+        "speaker_id": "alice"
+      },
+      {
+        "dataset_name": "jsbeaudry/news-creole",
+        "split": "train",
+        "text_column": "sentence",
+        "speaker_column": "speaker_id"
+      }
+    ],
     "hf_token": "hf_xxxxxxxxxxxxxxxxxxxx",
     "hub_repo": "jsbeaudry/kani-pretrain-data"
   }'
 ```
 
-**Example -- encode locally only:**
+**Example -- single dataset (still uses `datasets` array):**
 ```bash
 curl -X POST http://localhost:8000/data/prepare \
   -H "Content-Type: application/json" \
   -d '{
-    "dataset_name": "mozilla-foundation/common_voice_17_0",
-    "split": "train",
-    "speaker_column": "client_id",
-    "text_column": "sentence",
-    "output_dir": "./encoded_data"
+    "datasets": [
+      {
+        "dataset_name": "jsbeaudry/ecommerce-creole",
+        "speaker_id": "alice"
+      }
+    ],
+    "hub_repo": "jsbeaudry/kani-pretrain-data",
+    "hf_token": "hf_xxxxxxxxxxxxxxxxxxxx"
   }'
 ```
 
@@ -257,11 +274,14 @@ curl -X POST http://localhost:8000/data/prepare \
 
 Check data preparation progress.
 
-**Response:**
+**Response (in progress):**
 ```json
 {
   "job_id": "e5f6g7h8",
   "status": "running",
+  "current_dataset": "jsbeaudry/news-creole",
+  "datasets_done": 1,
+  "datasets_total": 2,
   "total": 5000,
   "processed": 1250,
   "failed_samples": 3,
@@ -271,15 +291,18 @@ Check data preparation progress.
 }
 ```
 
-When completed:
+**Response (completed):**
 ```json
 {
   "job_id": "e5f6g7h8",
   "status": "completed",
+  "current_dataset": null,
+  "datasets_done": 2,
+  "datasets_total": 2,
   "total": 5000,
   "processed": 4997,
   "failed_samples": 3,
-  "output_path": "./encoded_data/jsbeaudry-my-audio-dataset-train-nemo-encoded.json",
+  "output_path": "./encoded_data/jsbeaudry-kani-pretrain-data-merged-nemo-encoded.json",
   "hub_repo": "jsbeaudry/kani-pretrain-data",
   "error": null
 }
@@ -523,13 +546,14 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 # 1. Start the server
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 
-# 2. Encode raw audio into NeMo codec tokens
+# 2. Encode raw audio into NeMo codec tokens (multiple datasets merged)
 PREP=$(curl -s -X POST http://localhost:8000/data/prepare \
   -H "Content-Type: application/json" \
   -d '{
-    "dataset_name": "jsbeaudry/my-audio-dataset",
-    "split": "train",
-    "speaker_id": "alice",
+    "datasets": [
+      {"dataset_name": "jsbeaudry/ecommerce-creole", "speaker_id": "alice"},
+      {"dataset_name": "jsbeaudry/news-creole", "speaker_column": "speaker_id"}
+    ],
     "hf_token": "hf_xxxxxxxxxxxxxxxxxxxx",
     "hub_repo": "jsbeaudry/kani-pretrain-data"
   }' | python3 -c "import sys,json; print(json.load(sys.stdin)['job_id'])")

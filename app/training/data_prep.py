@@ -239,39 +239,35 @@ def encode_audio(audio_value, codec_model, device: str) -> dict:
 
 def run_data_preparation(
     job_id: str,
-    dataset_name: str,
-    split: str,
-    text_column: str,
-    audio_column: str,
-    speaker_column: str | None,
-    speaker_id: str | None,
+    dataset_sources: list[dict],
     output_dir: str,
     hf_token: str | None,
     hub_repo: str | None,
 ) -> None:
     """
-    Encode an entire HuggingFace dataset into NeMo codec tokens.
+    Encode one or more HuggingFace datasets into NeMo codec tokens and
+    merge the results into a single output.
 
     Designed to run in a background thread via ``asyncio.to_thread()``.
 
     Steps:
-        1. Load the HF dataset.
-        2. Load / reuse the NeMo codec model.
-        3. Iterate over all samples, encode audio, attach text/speaker metadata.
-        4. Save results as JSON.
-        5. (Optional) Push the encoded dataset to HuggingFace Hub.
+        1. For each dataset source: load, encode audio, attach metadata.
+        2. Merge all encoded samples into one list.
+        3. Save merged results as a single JSON file.
+        4. (Optional) Push the merged dataset to HuggingFace Hub.
 
     Args:
         job_id: Unique job identifier for status tracking.
-        dataset_name: HF dataset repo ID (e.g. ``user/dataset``).
-        split: Dataset split to process.
-        text_column: Name of the text transcription column.
-        audio_column: Name of the audio column.
-        speaker_column: Name of the speaker ID column (or None).
-        speaker_id: Fixed speaker ID to assign to all samples (or None).
+        dataset_sources: List of dicts, each containing:
+            - dataset_name (str): HF dataset repo ID.
+            - split (str): Dataset split.
+            - audio_column (str): Audio column name.
+            - text_column (str): Text column name.
+            - speaker_column (str | None): Speaker ID column.
+            - speaker_id (str | None): Fixed speaker ID.
         output_dir: Directory to write the output JSON file.
         hf_token: HF API token for Hub upload (or None to skip).
-        hub_repo: HF Hub repo ID for the encoded dataset (or None).
+        hub_repo: HF Hub repo ID for the merged encoded dataset (or None).
 
     Side effects:
         Updates ``data_prep_jobs[job_id]`` throughout processing.
@@ -279,76 +275,104 @@ def run_data_preparation(
     from datasets import load_dataset, Dataset, Audio
 
     try:
-        data_prep_jobs[job_id]["status"] = "running"
+        job = data_prep_jobs[job_id]
+        job["status"] = "running"
+        job["datasets_total"] = len(dataset_sources)
 
-        # 1) Load dataset -- disable audio auto-decoding to avoid the
-        #    torchcodec dependency.  We decode manually with soundfile.
-        print(f"[{job_id}] Loading dataset: {dataset_name} (split={split})")
-        dataset = load_dataset(dataset_name, split=split)
-        dataset = dataset.cast_column(audio_column, Audio(decode=False))
-        total = len(dataset)
-        data_prep_jobs[job_id]["total"] = total
-        print(f"[{job_id}] Loaded {total} samples")
-
-        # 2) Load codec
+        # Load codec once for all datasets
         codec_model, device = _get_codec_model()
 
-        # 3) Encode all samples
-        results = []
-        failed_count = 0
+        all_results = []
+        total_samples = 0
+        total_failed = 0
 
-        for idx, sample in enumerate(dataset):
-            try:
-                encoded = encode_audio(sample[audio_column], codec_model, device)
+        for ds_idx, src in enumerate(dataset_sources):
+            ds_name = src["dataset_name"]
+            split = src["split"]
+            audio_col = src["audio_column"]
+            text_col = src["text_column"]
+            spk_col = src.get("speaker_column")
+            spk_id = src.get("speaker_id")
 
-                # Attach metadata
-                encoded["text"] = sample.get(text_column, "")
+            job["current_dataset"] = ds_name
 
-                if speaker_id is not None:
-                    encoded["speaker"] = speaker_id
-                elif speaker_column and speaker_column in sample:
-                    encoded["speaker"] = sample[speaker_column]
-                else:
-                    encoded["speaker"] = "anon"
+            # 1) Load dataset -- disable audio auto-decoding to avoid
+            #    the torchcodec dependency.  We decode with soundfile.
+            print(f"[{job_id}] [{ds_idx+1}/{len(dataset_sources)}] Loading: {ds_name} (split={split})")
+            dataset = load_dataset(ds_name, split=split)
+            dataset = dataset.cast_column(audio_col, Audio(decode=False))
+            ds_len = len(dataset)
+            total_samples += ds_len
+            job["total"] = total_samples
+            print(f"[{job_id}] Loaded {ds_len} samples from {ds_name}")
 
-                results.append(encoded)
+            # 2) Encode all samples in this dataset
+            ds_failed = 0
+            for idx, sample in enumerate(dataset):
+                try:
+                    encoded = encode_audio(sample[audio_col], codec_model, device)
 
-                if (idx + 1) % 50 == 0 or idx == total - 1:
-                    data_prep_jobs[job_id]["processed"] = len(results)
-                    print(f"[{job_id}] Encoded {len(results)}/{total} samples")
+                    # Attach metadata
+                    encoded["text"] = sample.get(text_col, "")
 
-            except Exception as e:
-                failed_count += 1
-                if failed_count <= 3:
-                    # Print full traceback for the first few failures to aid debugging
-                    print(f"[{job_id}] Error encoding sample {idx}:\n{traceback.format_exc()}")
-                else:
-                    print(f"[{job_id}] Error encoding sample {idx}: {e}")
+                    if spk_id is not None:
+                        encoded["speaker"] = spk_id
+                    elif spk_col and spk_col in sample:
+                        encoded["speaker"] = sample[spk_col]
+                    else:
+                        encoded["speaker"] = "anon"
 
-        data_prep_jobs[job_id]["processed"] = len(results)
-        data_prep_jobs[job_id]["failed_samples"] = failed_count
+                    all_results.append(encoded)
 
-        # 4) Save JSON
+                    if (idx + 1) % 50 == 0 or idx == ds_len - 1:
+                        job["processed"] = len(all_results)
+                        print(f"[{job_id}] [{ds_name}] Encoded {idx+1}/{ds_len} samples")
+
+                except Exception as e:
+                    ds_failed += 1
+                    total_failed += 1
+                    if total_failed <= 3:
+                        print(f"[{job_id}] Error encoding {ds_name} sample {idx}:\n{traceback.format_exc()}")
+                    else:
+                        print(f"[{job_id}] Error encoding {ds_name} sample {idx}: {e}")
+
+            job["datasets_done"] = ds_idx + 1
+            job["failed_samples"] = total_failed
+            print(f"[{job_id}] Finished {ds_name}: {ds_len - ds_failed} encoded, {ds_failed} failed")
+
+        job["processed"] = len(all_results)
+        job["current_dataset"] = None
+
+        # 3) Save merged JSON
         os.makedirs(output_dir, exist_ok=True)
-        safe_name = dataset_name.replace("/", "-")
-        output_path = os.path.join(output_dir, f"{safe_name}-{split}-nemo-encoded.json")
+        if hub_repo:
+            safe_name = hub_repo.replace("/", "-")
+        else:
+            safe_name = "-".join(
+                s["dataset_name"].replace("/", "-") for s in dataset_sources
+            )
+        output_path = os.path.join(output_dir, f"{safe_name}-merged-nemo-encoded.json")
 
         with open(output_path, "w") as f:
-            json.dump(results, f, indent=2, ensure_ascii=False)
+            json.dump(all_results, f, indent=2, ensure_ascii=False)
 
-        data_prep_jobs[job_id]["output_path"] = output_path
-        print(f"[{job_id}] Saved {len(results)} encoded samples to {output_path}")
+        job["output_path"] = output_path
+        print(f"[{job_id}] Saved {len(all_results)} merged samples to {output_path}")
 
-        # 5) Optional: push to Hub
+        # 4) Optional: push merged dataset to Hub
         if hf_token and hub_repo:
-            print(f"[{job_id}] Uploading encoded dataset to {hub_repo}...")
-            encoded_dataset = Dataset.from_list(results)
-            encoded_dataset.push_to_hub(hub_repo, split=split, token=hf_token)
-            data_prep_jobs[job_id]["hub_repo"] = hub_repo
+            print(f"[{job_id}] Uploading merged dataset to {hub_repo}...")
+            encoded_dataset = Dataset.from_list(all_results)
+            encoded_dataset.push_to_hub(hub_repo, split="train", token=hf_token)
+            job["hub_repo"] = hub_repo
             print(f"[{job_id}] Uploaded to {hub_repo}")
 
-        data_prep_jobs[job_id]["status"] = "completed"
-        print(f"[{job_id}] Data preparation complete: {len(results)}/{total} samples encoded")
+        job["status"] = "completed"
+        print(
+            f"[{job_id}] Data preparation complete: "
+            f"{len(all_results)}/{total_samples} samples from "
+            f"{len(dataset_sources)} dataset(s)"
+        )
 
     except Exception as e:
         data_prep_jobs[job_id]["status"] = "failed"

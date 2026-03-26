@@ -544,15 +544,13 @@ class HubUploadResponse(BaseModel):
 # Data Preparation
 # ═══════════════════════════════════════════════════════════════════════════
 
-class DataPrepRequest(BaseModel):
+class DatasetSourceSchema(BaseModel):
     """
-    Request body for the POST /data/prepare endpoint.
+    A single HuggingFace dataset source for data preparation.
 
-    Encodes raw audio from a HuggingFace dataset into NeMo Nano Codec
-    tokens, producing a dataset ready for Kani TTS fine-tuning.
-
-    The source dataset must contain an audio column (HF audio format)
-    and a text transcription column.
+    Each source specifies which HF dataset to load and how its columns
+    are named. Multiple sources can be combined in a single data
+    preparation job to produce one merged encoded dataset.
     """
 
     dataset_name: str = Field(
@@ -587,11 +585,34 @@ class DataPrepRequest(BaseModel):
     speaker_id: Optional[str] = Field(
         None,
         description=(
-            "Fixed speaker ID to assign to ALL samples. "
+            "Fixed speaker ID to assign to ALL samples in this dataset. "
             "Use this for single-speaker datasets. "
             "Overrides `speaker_column` if both are provided."
         ),
         examples=["alice", "0047599005d8"],
+    )
+
+
+class DataPrepRequest(BaseModel):
+    """
+    Request body for the POST /data/prepare endpoint.
+
+    Encodes raw audio from one or more HuggingFace datasets into NeMo
+    Nano Codec tokens, producing a single merged dataset ready for
+    Kani TTS fine-tuning.
+
+    Each entry in ``datasets`` specifies a HF dataset and its column
+    mappings. All encoded samples are merged into one output file and
+    optionally uploaded to a single HuggingFace Hub repository.
+    """
+
+    datasets: list[DatasetSourceSchema] = Field(
+        ...,
+        min_length=1,
+        description=(
+            "One or more HuggingFace dataset sources to encode and merge. "
+            "Each source can have different column names and speaker settings."
+        ),
     )
     output_dir: str = Field(
         "./encoded_data",
@@ -603,14 +624,14 @@ class DataPrepRequest(BaseModel):
         None,
         description=(
             "HuggingFace API token. When provided along with `hub_repo`, "
-            "the encoded dataset is automatically uploaded to the Hub."
+            "the merged encoded dataset is automatically uploaded to the Hub."
         ),
         examples=["hf_xxxxxxxxxxxxxxxxxxxx"],
     )
     hub_repo: Optional[str] = Field(
         None,
         description=(
-            "HuggingFace Hub repo ID to upload the encoded dataset to "
+            "HuggingFace Hub repo ID to upload the merged encoded dataset to "
             "(e.g. `user/encoded-dataset`). Requires `hf_token`."
         ),
         examples=["jsbeaudry/kani-pretrain-data"],
@@ -620,11 +641,22 @@ class DataPrepRequest(BaseModel):
         "json_schema_extra": {
             "examples": [
                 {
-                    "dataset_name": "jsbeaudry/my-audio-dataset",
-                    "split": "train",
-                    "audio_column": "audio",
-                    "text_column": "text",
-                    "speaker_id": "alice",
+                    "datasets": [
+                        {
+                            "dataset_name": "jsbeaudry/dataset-a",
+                            "split": "train",
+                            "audio_column": "audio",
+                            "text_column": "text",
+                            "speaker_id": "alice",
+                        },
+                        {
+                            "dataset_name": "jsbeaudry/dataset-b",
+                            "split": "train",
+                            "audio_column": "audio",
+                            "text_column": "sentence",
+                            "speaker_column": "speaker_id",
+                        },
+                    ],
                     "output_dir": "./encoded_data",
                     "hf_token": "hf_xxxxxxxxxxxxxxxxxxxx",
                     "hub_repo": "jsbeaudry/kani-pretrain-data",
@@ -662,25 +694,37 @@ class DataPrepStatusResponse(BaseModel):
         description="Current job status: `starting`, `running`, `completed`, or `failed`.",
         examples=["running", "completed", "failed"],
     )
+    current_dataset: Optional[str] = Field(
+        None,
+        description="The dataset currently being processed (None when completed/failed).",
+    )
+    datasets_done: int = Field(
+        0,
+        description="Number of datasets fully processed so far.",
+    )
+    datasets_total: int = Field(
+        0,
+        description="Total number of datasets to process.",
+    )
     total: Optional[int] = Field(
         None,
-        description="Total number of samples in the source dataset.",
+        description="Total number of samples across all datasets.",
     )
     processed: int = Field(
         0,
-        description="Number of samples successfully encoded so far.",
+        description="Number of samples successfully encoded so far (across all datasets).",
     )
     failed_samples: int = Field(
         0,
-        description="Number of samples that failed to encode.",
+        description="Number of samples that failed to encode (across all datasets).",
     )
     output_path: Optional[str] = Field(
         None,
-        description="Path to the output JSON file (set when completed).",
+        description="Path to the merged output JSON file (set when completed).",
     )
     hub_repo: Optional[str] = Field(
         None,
-        description="Hub repo the encoded dataset was uploaded to (if applicable).",
+        description="Hub repo the merged encoded dataset was uploaded to (if applicable).",
     )
     error: Optional[str] = Field(
         None,
