@@ -408,25 +408,6 @@ async def upload_model(req: HubUploadRequest):
         repo=req.dataset_name,
         model_path=req.model_path,
     )
-g.data_prep import data_prep_jobs
-
-    if job_id not in data_prep_jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
-
-    job = data_prep_jobs[job_id]
-    return DataPrepStatusResponse(
-        job_id=job_id,
-        status=job["status"],
-        current_dataset=job.get("current_dataset"),
-        datasets_done=job.get("datasets_done", 0),
-        datasets_total=job.get("datasets_total", 0),
-        total=job.get("total"),
-        processed=job.get("processed", 0),
-        failed_samples=job.get("failed_samples", 0),
-        output_path=job.get("output_path"),
-        hub_repo=job.get("hub_repo"),
-        error=job.get("error"),
-    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
