@@ -13,4 +13,4 @@ numpy
 librosa
 soundfile
 kani-tts
-nemo_toolkit[asr]
+nemo_toolkit
