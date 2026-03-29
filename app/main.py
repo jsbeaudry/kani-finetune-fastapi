@@ -26,7 +26,7 @@ import io
 import uuid
 
 import numpy as np
-import scipy.io.wavfile
+import soundfile as sf
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
@@ -283,8 +283,7 @@ async def tts(req: TTSRequest):
 
     # Convert float32 numpy audio to 16-bit PCM WAV
     buf = io.BytesIO()
-    audio_int16 = np.clip(audio * 32767, -32768, 32767).astype(np.int16)
-    scipy.io.wavfile.write(buf, 22050, audio_int16)
+    sf.write(buf, audio, 22050, subtype="PCM_16", format="WAV")
     buf.seek(0)
 
     return StreamingResponse(
