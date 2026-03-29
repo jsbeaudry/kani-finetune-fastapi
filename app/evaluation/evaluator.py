@@ -187,7 +187,7 @@ def compare_audio(ref_audio: np.ndarray, gen_audio: np.ndarray) -> dict:
 
 def run_evaluation(
     job_id: str,
-    kani_model,
+    tts_model,
     dataset_name: str,
     split: str,
     text_column: str,
@@ -203,12 +203,12 @@ def run_evaluation(
 
     For each sample in the dataset:
         1. Decode the reference audio from the HF dataset.
-        2. Generate TTS audio using the loaded Kani model.
+        2. Generate TTS audio using the loaded KaniTTS model.
         3. Compare the two using acoustic similarity metrics.
 
     Args:
         job_id: Unique job identifier for status tracking.
-        kani_model: The loaded KaniModel instance (singleton from main.py).
+        tts_model: The loaded KaniTTS instance (callable).
         dataset_name: HF dataset repo ID containing test audio/text pairs.
         split: Dataset split to evaluate (e.g. "test").
         text_column: Column name for transcription text.
@@ -252,8 +252,11 @@ def run_evaluation(
                 if spk is None and speaker_column and speaker_column in sample:
                     spk = sample[speaker_column]
 
-                # 4) Generate TTS audio
-                gen_audio, _ = kani_model.run_model(text, speaker_id=spk)
+                # 4) Generate TTS audio via KaniTTS (callable)
+                gen_kwargs = {}
+                if spk is not None:
+                    gen_kwargs["speaker_id"] = spk
+                gen_audio, _ = tts_model(text, **gen_kwargs)
 
                 # 5) Compare
                 metrics = compare_audio(ref_audio, gen_audio)

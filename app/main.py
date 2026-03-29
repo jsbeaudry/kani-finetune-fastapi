@@ -3,12 +3,14 @@ Kani TTS API - Main Application
 ================================
 
 FastAPI application providing endpoints for:
-- Text-to-Speech inference via the Kani TTS model
+- Text-to-Speech inference via the Kani TTS model (``kani_tts`` library)
+- Dataset preparation (NeMo Nano Codec encoding)
 - LoRA fine-tuning job management
-- Model hot-swapping at runtime
+- Model evaluation (acoustic similarity metrics)
+- Model hot-swapping at runtime and HuggingFace Hub upload
 
-The TTS model and NeMo audio codec are loaded once at startup via the
-FastAPI lifespan handler, then shared across all request handlers.
+The TTS model is loaded once at startup via the ``kani_tts.KaniTTS``
+wrapper, which handles tokenizer, causal LM, and NeMo codec internally.
 
 Run with:
     uvicorn app.main:app --host 0.0.0.0 --port 8000
@@ -23,6 +25,7 @@ Environment variables (all prefixed with KANI_):
 
 import asyncio
 import io
+import os
 import uuid
 
 import numpy as np
@@ -51,10 +54,29 @@ from app.schemas import (
 )
 
 # ---------------------------------------------------------------------------
-# Global model singletons -- populated during the lifespan startup phase.
+# Global model singleton -- populated during the lifespan startup phase.
+# Uses the kani_tts library which bundles tokenizer + LM + NeMo codec.
 # ---------------------------------------------------------------------------
-kani_model = None
-audio_player = None
+tts_model = None
+_current_model_name = None
+
+
+def _load_kani_model(model_name: str):
+    """
+    Load (or reload) a KaniTTS model.
+
+    Args:
+        model_name: HuggingFace repo ID or local path.
+
+    Returns:
+        Loaded KaniTTS instance.
+    """
+    from kani_tts import KaniTTS
+    return KaniTTS(
+        model_name,
+        suppress_logs=True,
+        show_info=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -67,26 +89,22 @@ async def lifespan(app: FastAPI):
     FastAPI lifespan event handler.
 
     On startup:
-        1. Initializes the NeMo audio codec (NemoAudioPlayer).
-        2. Loads the Kani causal-LM model (KaniModel) with optional
-           Flash Attention 2 and torch.compile.
+        Loads the Kani TTS model via ``kani_tts.KaniTTS``, which
+        initializes the causal LM, tokenizer, and NeMo audio codec.
 
     On shutdown:
-        Releases model references so GPU memory is freed.
+        Releases the model reference so GPU memory is freed.
     """
-    global kani_model, audio_player
+    global tts_model, _current_model_name
 
-    from app.models.audio_player import NemoAudioPlayer
-    from app.models.kani_model import KaniModel
-
-    print("Loading Kani TTS model...")
-    audio_player = NemoAudioPlayer(settings)
-    kani_model = KaniModel(settings, audio_player)
+    print(f"Loading Kani TTS model: {settings.model_name}")
+    tts_model = _load_kani_model(settings.model_name)
+    _current_model_name = settings.model_name
     print("Model loaded and ready!")
 
     yield
 
-    del kani_model, audio_player
+    del tts_model
 
 
 # ---------------------------------------------------------------------------
@@ -200,8 +218,8 @@ async def health():
     """
     return HealthResponse(
         status="ok",
-        model=settings.model_name,
-        model_loaded=kani_model is not None,
+        model=_current_model_name or settings.model_name,
+        model_loaded=tts_model is not None,
     )
 
 
@@ -237,12 +255,13 @@ async def tts(req: TTSRequest):
     """
     Text-to-Speech generation endpoint.
 
+    Uses the ``kani_tts.KaniTTS`` library for end-to-end synthesis.
+
     Workflow:
-        1. Tokenize the text, prepend speaker_id if provided.
-        2. Run causal-LM generate with sampling parameters.
-        3. Extract audio codec tokens from the generated sequence.
-        4. Decode tokens to a PCM waveform via the NeMo Nano Codec.
-        5. Pack the waveform into a WAV byte-stream and return it.
+        1. If ``model`` is specified and differs from the current model,
+           hot-swap to the requested model.
+        2. Call ``KaniTTS.__call__()`` with the text and optional params.
+        3. Pack the float32 numpy audio into a 16-bit PCM WAV stream.
 
     Args:
         req: TTSRequest containing the text prompt and optional overrides.
@@ -252,33 +271,44 @@ async def tts(req: TTSRequest):
 
     Raises:
         HTTPException 503: If the model hasn't finished loading.
-        HTTPException 422: If the model output is malformed (e.g. missing
-            speech tokens, invalid codec sequence).
+        HTTPException 422: If the model output is malformed.
+        HTTPException 500: If model loading fails.
     """
-    if kani_model is None:
+    global tts_model, _current_model_name
+
+    if tts_model is None:
         raise HTTPException(status_code=503, detail="Model not loaded yet")
 
     # Hot-swap model if the request specifies a different one
-    if req.model_name and req.model_name != kani_model.conf.model_name:
+    requested = req.model_name
+    if requested and requested != _current_model_name:
         try:
-            await asyncio.to_thread(kani_model.reload_model, req.model_name)
+            tts_model = await asyncio.to_thread(_load_kani_model, requested)
+            _current_model_name = requested
         except Exception as e:
             raise HTTPException(
                 status_code=500,
-                detail=f"Failed to load model '{req.model_name}': {e}",
+                detail=f"Failed to load model '{requested}': {e}",
             )
+
+    # Build kwargs -- only pass overrides that are explicitly set
+    gen_kwargs = {}
+    if req.speaker_id is not None:
+        gen_kwargs["speaker_id"] = req.speaker_id
+    if req.temperature is not None:
+        gen_kwargs["temperature"] = req.temperature
+    if req.top_p is not None:
+        gen_kwargs["top_p"] = req.top_p
+    if req.max_new_tokens is not None:
+        gen_kwargs["max_new_tokens"] = req.max_new_tokens
+    if req.repetition_penalty is not None:
+        gen_kwargs["repetition_penalty"] = req.repetition_penalty
 
     try:
         audio, text = await asyncio.to_thread(
-            kani_model.run_model,
-            req.text,
-            speaker_id=req.speaker_id,
-            temperature=req.temperature,
-            top_p=req.top_p,
-            max_new_tokens=req.max_new_tokens,
-            repetition_penalty=req.repetition_penalty,
+            tts_model, req.text, **gen_kwargs
         )
-    except ValueError as e:
+    except Exception as e:
         raise HTTPException(status_code=422, detail=str(e))
 
     # Convert float32 numpy audio to 16-bit PCM WAV
@@ -506,17 +536,22 @@ async def load_model(req: ModelLoadRequest):
     """
     Hot-swap the TTS model at runtime.
 
+    Loads a new ``KaniTTS`` instance, replacing the current one.
+
     Args:
         req: ModelLoadRequest with the path/repo of the new model.
 
     Returns:
         Confirmation with the new model name.
     """
-    if kani_model is None:
+    global tts_model, _current_model_name
+
+    if tts_model is None:
         raise HTTPException(status_code=503, detail="Model not initialized")
 
     try:
-        await asyncio.to_thread(kani_model.reload_model, req.model_path)
+        tts_model = await asyncio.to_thread(_load_kani_model, req.model_path)
+        _current_model_name = req.model_path
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -601,22 +636,28 @@ async def evaluate(req: EvalRequest):
     """
     Launch a background evaluation job.
 
+    If ``model`` is specified and differs from the current model,
+    the model is hot-swapped before evaluation begins.
+
     Returns:
         EvalResponse with the assigned job_id and initial status.
     """
+    global tts_model, _current_model_name
     from app.evaluation.evaluator import eval_jobs, run_evaluation
 
-    if kani_model is None:
+    if tts_model is None:
         raise HTTPException(status_code=503, detail="Model not loaded yet")
 
     # Hot-swap model if requested
-    if req.model_name and req.model_name != kani_model.conf.model_name:
+    requested = req.model_name
+    if requested and requested != _current_model_name:
         try:
-            await asyncio.to_thread(kani_model.reload_model, req.model_name)
+            tts_model = await asyncio.to_thread(_load_kani_model, requested)
+            _current_model_name = requested
         except Exception as e:
             raise HTTPException(
                 status_code=500,
-                detail=f"Failed to load model '{req.model_name}': {e}",
+                detail=f"Failed to load model '{requested}': {e}",
             )
 
     job_id = str(uuid.uuid4())[:8]
@@ -633,7 +674,7 @@ async def evaluate(req: EvalRequest):
         None,
         run_evaluation,
         job_id,
-        kani_model,
+        tts_model,
         req.dataset_name,
         req.split,
         req.text_column,
