@@ -2,7 +2,7 @@ fastapi>=0.115.0
 pydantic-settings>=2.0.0
 uvicorn[standard]>=0.30.0
 torch
-transformers==4.57.1
+transformers
 trl>=0.18.2
 peft>=0.15.2
 datasets
@@ -12,5 +12,6 @@ scipy
 numpy
 librosa
 soundfile
-kani-tts
+nemo_toolkit
+tts
 nemo_toolkit
