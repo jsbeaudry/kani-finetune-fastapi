@@ -11,6 +11,7 @@ across all API endpoints. Organized by domain:
   CategoricalFilterSchema, HFDatasetSchema
 - **Model Management**: ModelLoadRequest, ModelLoadResponse
 - **Hub Upload**: HubUploadRequest, HubUploadResponse
+- **Evaluation**: EvalRequest, EvalResponse, EvalStatusResponse
 - **Health**: HealthResponse
 """
 
@@ -739,4 +740,181 @@ class DataPrepStatusResponse(BaseModel):
     error: Optional[str] = Field(
         None,
         description="Python traceback if the job failed.",
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Evaluation
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class EvalRequest(BaseModel):
+    """
+    Request body for the POST /evaluate endpoint.
+
+    Evaluates a TTS model by comparing its generated audio against
+    reference (human) recordings from a HuggingFace test dataset.
+
+    Each sample's text is synthesized, then compared to the reference
+    audio using MFCC, Chroma, Spectral Centroid, and DTW metrics.
+    """
+
+    dataset_name: str = Field(
+        ...,
+        description=(
+            "HuggingFace dataset repo ID containing test audio/text pairs "
+            "(e.g. `jsbeaudry/ecommerce-creole`)."
+        ),
+        examples=["jsbeaudry/ecommerce-creole"],
+    )
+    split: str = Field(
+        "test",
+        description="Dataset split to evaluate (`test`, `train`, `validation`).",
+    )
+    audio_column: str = Field(
+        "audio",
+        description="Name of the column containing reference audio (HF audio format).",
+    )
+    text_column: str = Field(
+        "text",
+        description="Name of the column containing text transcriptions.",
+    )
+    speaker_column: Optional[str] = Field(
+        None,
+        description="Column with speaker IDs (for multi-speaker models).",
+        examples=["speaker_id"],
+    )
+    speaker_id: Optional[str] = Field(
+        None,
+        description=(
+            "Fixed speaker ID for all samples. Overrides `speaker_column`."
+        ),
+        examples=["alice"],
+    )
+    hf_token: Optional[str] = Field(
+        None,
+        description="HuggingFace API token (required for private datasets).",
+        examples=["hf_xxxxxxxxxxxxxxxxxxxx"],
+    )
+    model: Optional[str] = Field(
+        None,
+        description=(
+            "HuggingFace repo ID or local path of the model to evaluate. "
+            "If different from the currently loaded model, a hot-swap is "
+            "performed before evaluation. When omitted, the current model is used."
+        ),
+        examples=["jsbeaudry/haitian-kani-ht-v3"],
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "dataset_name": "jsbeaudry/ecommerce-creole",
+                    "split": "test",
+                    "text_column": "text",
+                    "audio_column": "audio",
+                    "speaker_id": "alice",
+                    "hf_token": "hf_xxxxxxxxxxxxxxxxxxxx",
+                }
+            ]
+        }
+    }
+
+
+class EvalResponse(BaseModel):
+    """Response returned immediately when an evaluation job is submitted."""
+
+    job_id: str = Field(
+        ...,
+        description="Unique 8-character identifier for this evaluation job.",
+        examples=["a1b2c3d4"],
+    )
+    status: str = Field(
+        ...,
+        description="Initial status (always `\"started\"`).",
+        examples=["started"],
+    )
+
+
+class EvalSampleResult(BaseModel):
+    """Per-sample evaluation result."""
+
+    sample_index: int = Field(..., description="Index of the sample in the dataset.")
+    text: str = Field(..., description="Input text (truncated to 100 chars).")
+    mfcc_similarity: Optional[float] = Field(
+        None, description="MFCC cosine similarity (timbre & vocal quality) [0-1]."
+    )
+    chroma_similarity: Optional[float] = Field(
+        None, description="Chroma cosine similarity (pitch & harmonic content) [0-1]."
+    )
+    spectral_centroid_similarity: Optional[float] = Field(
+        None, description="Spectral centroid similarity (brightness match) [0-1]."
+    )
+    dtw_similarity: Optional[float] = Field(
+        None, description="DTW similarity (temporal structure alignment) [0-1]."
+    )
+    overall_score: Optional[float] = Field(
+        None,
+        description=(
+            "Weighted combination: MFCC(0.35) + Chroma(0.25) + "
+            "Spectral(0.15) + DTW(0.25). [0-1]"
+        ),
+    )
+    error: Optional[str] = Field(
+        None, description="Error message if this sample failed."
+    )
+
+
+class EvalSummary(BaseModel):
+    """Dataset-level aggregated evaluation metrics."""
+
+    mfcc_similarity: float = Field(
+        ..., description="Average MFCC cosine similarity across all samples."
+    )
+    chroma_similarity: float = Field(
+        ..., description="Average Chroma cosine similarity across all samples."
+    )
+    spectral_centroid_similarity: float = Field(
+        ..., description="Average Spectral Centroid similarity across all samples."
+    )
+    dtw_similarity: float = Field(
+        ..., description="Average DTW similarity across all samples."
+    )
+    overall_score: float = Field(
+        ..., description="Average weighted overall score across all samples."
+    )
+    samples_evaluated: int = Field(
+        ..., description="Number of samples successfully evaluated."
+    )
+    samples_failed: int = Field(
+        ..., description="Number of samples that failed during evaluation."
+    )
+
+
+class EvalStatusResponse(BaseModel):
+    """Response from GET /evaluate/{job_id} showing evaluation progress and results."""
+
+    job_id: str = Field(..., description="The evaluation job identifier.")
+    status: str = Field(
+        ...,
+        description="Current job status: `starting`, `running`, `completed`, or `failed`.",
+        examples=["running", "completed"],
+    )
+    total: Optional[int] = Field(
+        None, description="Total number of samples in the test dataset."
+    )
+    processed: int = Field(
+        0, description="Number of samples evaluated so far."
+    )
+    results: Optional[List[EvalSampleResult]] = Field(
+        None,
+        description="Per-sample evaluation results (populated when completed).",
+    )
+    summary: Optional[EvalSummary] = Field(
+        None,
+        description="Dataset-level aggregated metrics (populated when completed).",
+    )
+    error: Optional[str] = Field(
+        None, description="Python traceback if the job failed."
     )

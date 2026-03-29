@@ -45,6 +45,9 @@ from app.schemas import (
     DataPrepRequest,
     DataPrepResponse,
     DataPrepStatusResponse,
+    EvalRequest,
+    EvalResponse,
+    EvalStatusResponse,
 )
 
 # ---------------------------------------------------------------------------
@@ -159,6 +162,13 @@ app = FastAPI(
             "description": (
                 "Hot-swap the loaded model checkpoint at runtime "
                 "and upload checkpoints to the HuggingFace Hub."
+            ),
+        },
+        {
+            "name": "Evaluation",
+            "description": (
+                "Evaluate TTS quality by comparing generated audio against "
+                "reference recordings using acoustic similarity metrics."
             ),
         },
         {
@@ -561,4 +571,118 @@ async def upload_model(req: HubUploadRequest):
         status="ok",
         repo=req.dataset_name,
         model_path=req.model_path,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Evaluation
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@app.post(
+    "/evaluate",
+    response_model=EvalResponse,
+    tags=["Evaluation"],
+    summary="Evaluate TTS quality against a reference dataset",
+    description=(
+        "Compares TTS-generated audio against reference (human) recordings "
+        "from a HuggingFace dataset using acoustic similarity metrics:\n\n"
+        "- **MFCC Cosine Similarity** -- timbre & vocal quality\n"
+        "- **Chroma Cosine Similarity** -- pitch & harmonic content\n"
+        "- **Spectral Centroid Similarity** -- brightness match\n"
+        "- **DTW (Dynamic Time Warping)** -- temporal structure\n"
+        "- **Overall Score** -- weighted combination "
+        "(MFCC 0.35 + Chroma 0.25 + Spectral 0.15 + DTW 0.25)\n\n"
+        "All scores are on a **0-1 scale** where 1.0 = perfect match.\n\n"
+        "Processing runs in the background -- returns a `job_id` to poll "
+        "via `GET /evaluate/{job_id}`."
+    ),
+)
+async def evaluate(req: EvalRequest):
+    """
+    Launch a background evaluation job.
+
+    Returns:
+        EvalResponse with the assigned job_id and initial status.
+    """
+    from app.evaluation.evaluator import eval_jobs, run_evaluation
+
+    if kani_model is None:
+        raise HTTPException(status_code=503, detail="Model not loaded yet")
+
+    # Hot-swap model if requested
+    if req.model and req.model != kani_model.conf.model_name:
+        try:
+            await asyncio.to_thread(kani_model.reload_model, req.model)
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to load model '{req.model}': {e}",
+            )
+
+    job_id = str(uuid.uuid4())[:8]
+    eval_jobs[job_id] = {
+        "status": "starting",
+        "error": None,
+        "total": None,
+        "processed": 0,
+        "results": None,
+        "summary": None,
+    }
+
+    asyncio.get_event_loop().run_in_executor(
+        None,
+        run_evaluation,
+        job_id,
+        kani_model,
+        req.dataset_name,
+        req.split,
+        req.text_column,
+        req.audio_column,
+        req.speaker_column,
+        req.speaker_id,
+        req.hf_token,
+    )
+
+    return EvalResponse(job_id=job_id, status="started")
+
+
+@app.get(
+    "/evaluate/{job_id}",
+    response_model=EvalStatusResponse,
+    tags=["Evaluation"],
+    summary="Check evaluation job status and results",
+    description=(
+        "Poll the status of an evaluation job.\n\n"
+        "When completed, returns per-sample scores and a dataset-level "
+        "summary with averaged metrics."
+    ),
+    responses={
+        404: {"description": "No evaluation job found with the given ID."},
+    },
+)
+async def eval_status(job_id: str):
+    """
+    Query the status and results of an evaluation job.
+
+    Args:
+        job_id: The 8-character UUID returned by POST /evaluate.
+
+    Returns:
+        EvalStatusResponse with progress, per-sample results, and summary.
+    """
+    from app.evaluation.evaluator import eval_jobs
+
+    if job_id not in eval_jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    job = eval_jobs[job_id]
+    return EvalStatusResponse(
+        job_id=job_id,
+        status=job["status"],
+        total=job.get("total"),
+        processed=job.get("processed", 0),
+        results=job.get("results"),
+        summary=job.get("summary"),
+        error=job.get("error"),
     )
