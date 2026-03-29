@@ -12,4 +12,5 @@ scipy
 numpy
 librosa
 soundfile
+kani-tts
 nemo_toolkit[tts]
