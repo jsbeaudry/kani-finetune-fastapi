@@ -53,6 +53,16 @@ class TTSRequest(BaseModel):
     default configuration (set via KANI_* environment variables).
     """
 
+    model: Optional[str] = Field(
+        None,
+        description=(
+            "HuggingFace repo ID or local path of the model to use for this request. "
+            "If different from the currently loaded model, a hot-swap is performed "
+            "before inference. When omitted, the currently loaded model is used "
+            "(the latest checkpoint if training was run, otherwise the startup model)."
+        ),
+        examples=["jsbeaudry/haitian-kani-ht-v3", "./checkpoints/lora_kani_model_ft_exp"],
+    )
     text: str = Field(
         ...,
         min_length=1,

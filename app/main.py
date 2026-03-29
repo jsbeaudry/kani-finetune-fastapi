@@ -248,6 +248,16 @@ async def tts(req: TTSRequest):
     if kani_model is None:
         raise HTTPException(status_code=503, detail="Model not loaded yet")
 
+    # Hot-swap model if the request specifies a different one
+    if req.model and req.model != kani_model.conf.model_name:
+        try:
+            await asyncio.to_thread(kani_model.reload_model, req.model)
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to load model '{req.model}': {e}",
+            )
+
     try:
         audio, text = await asyncio.to_thread(
             kani_model.run_model,
