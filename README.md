@@ -10,6 +10,7 @@ A production-ready **Text-to-Speech API** built on the [Kani TTS](https://huggin
 - **Data preparation** -- Encode raw audio datasets into NeMo codec tokens via API, ready for training
 - **LoRA fine-tuning** -- Launch background training jobs with custom HuggingFace datasets and track their status via API
 - **Model hot-swap** -- Load a different checkpoint at runtime without restarting the server
+- **Evaluation** -- Compare TTS output against reference audio using MFCC, Chroma, Spectral Centroid, and DTW similarity metrics
 - **HuggingFace Hub upload** -- Push models to the Hub automatically after training or via dedicated endpoint
 - **Frame-level position encoding** -- Optimized RoPE positions where all 4 codec tokens per audio frame share a single position ID, improving long-form coherence and KV-cache efficiency
 - **Flash Attention 2** -- Reduced memory usage and faster generation on Ampere+ GPUs
@@ -51,8 +52,12 @@ kani-finetune-fastapi/
         training/
             __init__.py
             collator.py           # FramePosCollator for SFT training
+            data_prep.py          # NeMo codec audio encoding pipeline
             dataset.py            # HF dataset loading & preprocessing
             trainer.py            # LoRA fine-tuning orchestration
+        evaluation/
+            __init__.py
+            evaluator.py          # Audio similarity metrics & eval runner
 ```
 
 ---
@@ -133,6 +138,8 @@ aplay output.wav
 | `GET` | `/train/{job_id}` | Check training job status |
 | `POST` | `/model/load` | Hot-swap the loaded model checkpoint |
 | `POST` | `/model/upload` | Upload a checkpoint to HuggingFace Hub |
+| `POST` | `/evaluate` | Evaluate TTS quality against a reference dataset (background) |
+| `GET` | `/evaluate/{job_id}` | Check evaluation job status and results |
 
 ### Interactive docs
 
@@ -508,6 +515,97 @@ curl -X POST http://localhost:8000/model/upload \
 **Error responses:**
 - `404` -- Model directory not found at the given path
 - `500` -- Upload failed (authentication error, network issue, etc.)
+
+---
+
+### `POST /evaluate`
+
+Evaluate TTS quality by comparing generated audio against reference (human) recordings from a HuggingFace test dataset.
+
+Runs in the background -- returns a `job_id` to poll progress and results.
+
+**Metrics:**
+
+| Metric | Weight | What it measures |
+|--------|--------|-----------------|
+| MFCC Cosine Similarity | 0.35 | Timbre & vocal quality |
+| Chroma Cosine Similarity | 0.25 | Pitch & harmonic content |
+| Spectral Centroid Similarity | 0.15 | Brightness match |
+| DTW (Dynamic Time Warping) | 0.25 | Temporal structure alignment |
+| **Overall Score** | -- | Weighted combination of the above |
+
+All scores are on a **0-1 scale** where 1.0 = perfect match.
+
+**Request body:**
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `dataset_name` | `string` | Yes | -- | HF dataset repo ID with test audio/text pairs |
+| `split` | `string` | No | `test` | Dataset split to evaluate |
+| `audio_column` | `string` | No | `audio` | Name of the reference audio column |
+| `text_column` | `string` | No | `text` | Name of the text transcription column |
+| `speaker_column` | `string` | No | `null` | Column with speaker IDs |
+| `speaker_id` | `string` | No | `null` | Fixed speaker ID for all samples |
+| `hf_token` | `string` | No | `null` | HF token (for private datasets) |
+| `model` | `string` | No | `null` | Model to evaluate (hot-swaps if different from current) |
+
+**Example:**
+```bash
+curl -X POST http://localhost:8000/evaluate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "dataset_name": "jsbeaudry/ecommerce-creole",
+    "split": "test",
+    "text_column": "text",
+    "audio_column": "audio",
+    "speaker_id": "alice",
+    "hf_token": "hf_xxxxxxxxxxxxxxxxxxxx",
+    "model": "jsbeaudry/haitian-kani-ht-v3"
+  }'
+```
+
+**Response:**
+```json
+{"job_id": "a1b2c3d4", "status": "started"}
+```
+
+---
+
+### `GET /evaluate/{job_id}`
+
+Check evaluation progress and retrieve results.
+
+**Response (completed):**
+```json
+{
+  "job_id": "a1b2c3d4",
+  "status": "completed",
+  "total": 50,
+  "processed": 50,
+  "summary": {
+    "mfcc_similarity": 0.8234,
+    "chroma_similarity": 0.7891,
+    "spectral_centroid_similarity": 0.9012,
+    "dtw_similarity": 0.7456,
+    "overall_score": 0.8032,
+    "samples_evaluated": 48,
+    "samples_failed": 2
+  },
+  "results": [
+    {
+      "sample_index": 0,
+      "text": "Bonjou, kijan ou ye?",
+      "mfcc_similarity": 0.8456,
+      "chroma_similarity": 0.8012,
+      "spectral_centroid_similarity": 0.9234,
+      "dtw_similarity": 0.7689,
+      "overall_score": 0.8273,
+      "error": null
+    }
+  ],
+  "error": null
+}
+```
 
 ---
 
