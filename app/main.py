@@ -259,13 +259,13 @@ async def tts(req: TTSRequest):
         raise HTTPException(status_code=503, detail="Model not loaded yet")
 
     # Hot-swap model if the request specifies a different one
-    if req.model and req.model != kani_model.conf.model_name:
+    if req.model_name and req.model_name != kani_model.conf.model_name:
         try:
-            await asyncio.to_thread(kani_model.reload_model, req.model)
+            await asyncio.to_thread(kani_model.reload_model, req.model_name)
         except Exception as e:
             raise HTTPException(
                 status_code=500,
-                detail=f"Failed to load model '{req.model}': {e}",
+                detail=f"Failed to load model '{req.model_name}': {e}",
             )
 
     try:
@@ -610,13 +610,13 @@ async def evaluate(req: EvalRequest):
         raise HTTPException(status_code=503, detail="Model not loaded yet")
 
     # Hot-swap model if requested
-    if req.model and req.model != kani_model.conf.model_name:
+    if req.model_name and req.model_name != kani_model.conf.model_name:
         try:
-            await asyncio.to_thread(kani_model.reload_model, req.model)
+            await asyncio.to_thread(kani_model.reload_model, req.model_name)
         except Exception as e:
             raise HTTPException(
                 status_code=500,
-                detail=f"Failed to load model '{req.model}': {e}",
+                detail=f"Failed to load model '{req.model_name}': {e}",
             )
 
     job_id = str(uuid.uuid4())[:8]

@@ -54,8 +54,9 @@ class TTSRequest(BaseModel):
     default configuration (set via KANI_* environment variables).
     """
 
-    model: Optional[str] = Field(
+    model_name: Optional[str] = Field(
         None,
+        alias="model",
         description=(
             "HuggingFace repo ID or local path of the model to use for this request. "
             "If different from the currently loaded model, a hot-swap is performed "
@@ -123,6 +124,7 @@ class TTSRequest(BaseModel):
     )
 
     model_config = {
+        "populate_by_name": True,
         "json_schema_extra": {
             "examples": [
                 {
@@ -131,6 +133,7 @@ class TTSRequest(BaseModel):
                 },
                 {
                     "text": "Bonjour, comment allez-vous?",
+                    "model": "jsbeaudry/haitian-kani-ht-v3",
                     "speaker_id": None,
                     "temperature": 0.6,
                     "max_new_tokens": 800,
@@ -796,8 +799,9 @@ class EvalRequest(BaseModel):
         description="HuggingFace API token (required for private datasets).",
         examples=["hf_xxxxxxxxxxxxxxxxxxxx"],
     )
-    model: Optional[str] = Field(
+    model_name: Optional[str] = Field(
         None,
+        alias="model",
         description=(
             "HuggingFace repo ID or local path of the model to evaluate. "
             "If different from the currently loaded model, a hot-swap is "
@@ -807,6 +811,7 @@ class EvalRequest(BaseModel):
     )
 
     model_config = {
+        "populate_by_name": True,
         "json_schema_extra": {
             "examples": [
                 {
