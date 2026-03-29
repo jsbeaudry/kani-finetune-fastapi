@@ -20,17 +20,20 @@ A production-ready **Text-to-Speech API** built on the [Kani TTS](https://huggin
 
 ## Architecture
 
+Inference uses the [`kani-tts`](https://pypi.org/project/kani-tts/) library which
+bundles the tokenizer, causal LM, and NeMo Nano Codec into a single callable:
+
 ```
-Text prompt
+Text prompt  +  (optional model name)
     |
     v
-[Tokenizer] --> [Causal LM (generate)] --> interleaved text + audio tokens
-                                                    |
-                                                    v
-                                   [NeMo Nano Codec (decode)] --> PCM waveform
-                                                                      |
-                                                                      v
-                                                                  WAV response (22050 Hz, 16-bit)
+[kani_tts.KaniTTS]  ──>  Tokenizer  ──>  Causal LM (generate)  ──>  NeMo Codec (decode)
+                                                                            |
+                                                                            v
+                                                                    PCM waveform (22050 Hz)
+                                                                            |
+                                                                            v
+                                                                    WAV response (16-bit)
 ```
 
 ---
@@ -47,8 +50,8 @@ kani-finetune-fastapi/
         schemas.py                # Request/response Pydantic models
         models/
             __init__.py
-            audio_player.py       # NeMo Nano Codec wrapper
-            kani_model.py         # Kani inference engine
+            audio_player.py       # NeMo Nano Codec wrapper (used by data prep)
+            kani_model.py         # Legacy inference engine (replaced by kani_tts)
         training/
             __init__.py
             collator.py           # FramePosCollator for SFT training
@@ -60,13 +63,18 @@ kani-finetune-fastapi/
             evaluator.py          # Audio similarity metrics & eval runner
 ```
 
+> **Note:** Inference uses the [`kani-tts`](https://pypi.org/project/kani-tts/) library
+> which bundles the tokenizer, causal LM, and NeMo codec into a single callable.
+> The `models/` directory contains legacy code used by the data preparation pipeline.
+
 ---
 
 ## Requirements
 
 - **Python** 3.10+
 - **CUDA GPU** (Ampere+ recommended for Flash Attention 2)
-- **NVIDIA NeMo Toolkit** (for the audio codec)
+- **kani-tts** -- Inference library wrapping tokenizer + LM + NeMo codec
+- **NVIDIA NeMo Toolkit** -- Audio codec for data preparation
 - ~4 GB VRAM for inference, ~16 GB+ for fine-tuning
 
 ---
@@ -99,9 +107,11 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
 On startup the server will:
-1. Download and load the NeMo Nano Codec (`nvidia/nemo-nano-codec-22khz-0.6kbps-12.5fps`)
-2. Download and load the Kani TTS model (`nineninesix/kani-tts-400m-0.3-pt`)
-3. Begin accepting requests once both are ready
+1. Load the Kani TTS model via `kani_tts.KaniTTS` (downloads tokenizer, causal LM, and NeMo codec automatically)
+2. Default model: `nineninesix/kani-tts-400m-0.3-pt` (configurable via `KANI_MODEL_NAME`)
+3. Begin accepting requests once the model is ready
+
+You can switch models at any time by passing `"model": "your/model"` in the `/tts` request body, or by calling `/model/load`.
 
 ### 2. Generate speech
 
@@ -175,13 +185,14 @@ Generate speech audio from a text prompt.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `text` | `string` | Yes | -- | The text to synthesize |
+| `model` | `string` | No | (current) | HF repo ID or local path -- hot-swaps if different from current model |
 | `speaker_id` | `string` | No | `null` | Speaker identity for voice conditioning |
 | `temperature` | `float` | No | `0.8` | Sampling temperature (0.0 - 2.0) |
 | `top_p` | `float` | No | `0.95` | Nucleus sampling threshold (0.0 - 1.0) |
 | `max_new_tokens` | `int` | No | `1200` | Max generation length (1 - 4096) |
 | `repetition_penalty` | `float` | No | `1.1` | Repetition penalty (1.0 - 3.0) |
 
-**Example:**
+**Example -- basic:**
 ```bash
 curl -X POST http://localhost:8000/tts \
   -H "Content-Type: application/json" \
@@ -190,6 +201,18 @@ curl -X POST http://localhost:8000/tts \
     "speaker_id": "0047599005d8",
     "temperature": 0.6,
     "max_new_tokens": 800
+  }' \
+  --output speech.wav
+```
+
+**Example -- with a specific model:**
+```bash
+curl -X POST http://localhost:8000/tts \
+  -H "Content-Type: application/json" \
+  -d '{
+    "text": "Hello from a different model!",
+    "model": "jsbeaudry/haitian-kani-ht-v3",
+    "speaker_id": "alice"
   }' \
   --output speech.wav
 ```
@@ -686,6 +709,21 @@ curl -X POST http://localhost:8000/tts \
   -H "Content-Type: application/json" \
   -d '{"text": "Hello from the fine-tuned model!"}' \
   --output finetuned_output.wav
+
+# 8. Evaluate the fine-tuned model against test data
+EVAL=$(curl -s -X POST http://localhost:8000/evaluate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "dataset_name": "jsbeaudry/ecommerce-creole",
+    "split": "test",
+    "speaker_id": "alice",
+    "hf_token": "hf_xxxxxxxxxxxxxxxxxxxx"
+  }' | python3 -c "import sys,json; print(json.load(sys.stdin)['job_id'])")
+
+echo "Evaluation job: $EVAL"
+
+# 9. Poll evaluation results
+curl http://localhost:8000/evaluate/$EVAL
 ```
 
 ### Upload a checkpoint manually (separate from training)
@@ -719,6 +757,12 @@ curl -X POST http://localhost:8000/model/upload \
 6. **Merge & save** -- LoRA weights merged into base model for standalone deployment
 7. **Hub upload** (optional) -- Auto-upload to HuggingFace Hub if `hf_token` + `dataset_name` are provided
 
+**Evaluation** (`POST /evaluate`):
+1. **Load test dataset** -- Downloads HF dataset with reference audio + text
+2. **Synthesize** -- Generates TTS audio for each text sample using `kani_tts`
+3. **Compare** -- Computes MFCC, Chroma, Spectral Centroid, and DTW similarity
+4. **Aggregate** -- Calculates per-sample and dataset-level weighted scores
+
 ---
 
 ## Audio Format
@@ -736,7 +780,7 @@ All generated audio is returned as:
 ```python
 import requests
 
-# Generate speech
+# Generate speech (uses the currently loaded model)
 response = requests.post(
     "http://localhost:8000/tts",
     json={
@@ -750,7 +794,20 @@ response = requests.post(
 with open("output.wav", "wb") as f:
     f.write(response.content)
 
-# Or use with scipy/soundfile for further processing
+# Generate speech with a specific model
+response = requests.post(
+    "http://localhost:8000/tts",
+    json={
+        "text": "Hello from a different model!",
+        "model": "jsbeaudry/haitian-kani-ht-v3",
+        "speaker_id": "alice",
+    },
+)
+
+with open("custom_model_output.wav", "wb") as f:
+    f.write(response.content)
+
+# Use with scipy/soundfile for further processing
 import io
 import scipy.io.wavfile
 
